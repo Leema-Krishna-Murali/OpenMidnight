@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --master_port=54572 --nproc_per_node=8 dinov2/train/train.py --config-file ./dinov2/configs/train/vitg14_reg4.yaml --output-dir ./output_pretrained_giant_litdata train.dataset_path=s3://tcga-12tb-litdata/
