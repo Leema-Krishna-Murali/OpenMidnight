@@ -549,7 +549,7 @@ def do_train(cfg, model, resume=False):
     if cfg.train.streaming_from_hf:
         dataset_builder = partial(
             _build_streaming_dataset,
-            dataset_path="medarc/TCGA-12K-parquet-shuffled",
+            dataset_path="/data/TCGA_parquet_sample30_shuffled",#"medarc/TCGA-12K-parquet-shuffled",
             shuffle_buffer=50000,                   
             base_seed=42, 
         )
@@ -776,7 +776,7 @@ def do_train(cfg, model, resume=False):
 
 def main(args):
     cfg = setup(args)
-    if cfg.student.arch == "vit_huge2":
+    if cfg.student.arch in {"vit_huge2", "vit_7b"}:
         for section in ("teacher", "student"):
             for sub in ("backbone", "dino_head", "ibot_head"):
                 mp = getattr(cfg.compute_precision[section], sub).mixed_precision
@@ -866,18 +866,18 @@ def main(args):
             model.student.backbone.norm.weight = model_pretrained.norm.weight
             model.student.backbone.norm.bias = model_pretrained.norm.bias 
 
-        elif cfg.student.arch == "vit_huge2":
+        elif cfg.student.arch in {"vit_huge2", "vit_7b"}:
             pretrained_ckpt = getattr(cfg.train, "pretrained_teacher_ckpt", "")
             if pretrained_ckpt == "":
-                raise AssertionError("train.pretrained_teacher_ckpt must be set for vit_huge2")
-            print(f"loading pretrained DINOv3 vit_huge2 from {pretrained_ckpt}")
+                raise AssertionError("train.pretrained_teacher_ckpt must be set for dinov3 backbones")
+            print(f"loading pretrained DINOv3 {cfg.student.arch} from {pretrained_ckpt}")
             teacher_state = torch.load(pretrained_ckpt, map_location=torch.device("cpu"))["teacher"]
             backbone_state = {k.replace("backbone.", ""): v for k, v in teacher_state.items() if k.startswith("backbone.")}
             # load only backbone; heads initialized from scratch
             model.student.backbone.load_state_dict(backbone_state, strict=True)
             model.teacher.backbone.load_state_dict(backbone_state, strict=True)
         else:
-            raise AssertionError("pretrained loading only supports vit_giant2 or vit_huge2")
+            raise AssertionError("pretrained loading only supports vit_giant2, vit_huge2, or vit_7b")
 
     model.prepare_for_distributed_training()
     logger.info("Model:\n{}".format(model))

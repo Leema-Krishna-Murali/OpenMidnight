@@ -1,0 +1,53 @@
+dino:
+  head_n_prototypes: 262144
+  head_bottleneck_dim: 1024
+  head_hidden_dim: 16384
+  head_nlayers: 3
+  do_kde: True
+  kde_loss_weight: .05
+  koleo_loss_weight: 0
+  do_koleo: False
+ibot:
+  separate_head: true
+  head_n_prototypes: 98304
+  head_bottleneck_dim: 768
+  head_hidden_dim: 8192
+  head_nlayers: 3
+train:
+  streaming_from_hf: False
+  batch_size_per_gpu: 8
+  centering: sinkhorn_knopp
+  use_pretrained: True
+  OFFICIAL_EPOCH_LENGTH: 1250
+  num_workers: 10
+  pretrained_teacher_ckpt: /home/paul/dinov3/checkpoints/dinov3_vit7b16_saved_teacher.pth
+student:
+  arch: vit_7b
+  patch_size: 16
+  drop_path_rate: 0.3
+  layerscale: 1.0e-05
+  ffn_layer: swiglu
+  ffn_ratio: 6.0
+  norm_layer: layernormbf16
+  n_storage_tokens: 4
+  mask_k_bias: true
+  pos_embed_rope_rescale_coords: 2.0
+  pos_embed_rope_dtype: fp32
+teacher:
+  momentum_teacher: 0.994
+  final_momentum_teacher: 1.0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 10
+  in_chans: 3
+optim:
+  epochs: 8000
+  early_stop: 200
+  weight_decay_end: 0.2
+  base_lr: 1.0e-04
+  warmup_epochs: 10
+  layerwise_decay: 1.0
+crops:
+  local_crops_size: 98
+evaluation:
+  eval_period_iterations: 2500 # save checkpoint every 2 epochs

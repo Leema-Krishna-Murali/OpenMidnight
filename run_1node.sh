@@ -11,8 +11,8 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" # specific devices to use on this 
 export NODE_RANK=0 # the node running this script will be master node (rank 0)
 
 # Training config
-CONFIG_FILE="./dinov2/configs/train/vitg14_reg4.yaml"
-OUTPUT_DIR="./output_openmidnight_replication_interpolatedposemb"
+CONFIG_FILE="./dinov2/configs/train/vit7b_dinov3.yaml"
+OUTPUT_DIR="./output_vit7b"
 RESUME="False" # set string to "True" to resume from last checkpoint in OUTPUT_DIR if it exists
 
 # Set Python path for imports

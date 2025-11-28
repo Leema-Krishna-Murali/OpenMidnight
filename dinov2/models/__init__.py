@@ -15,7 +15,8 @@ logger = logging.getLogger("dinov2")
 
 def build_model(args, only_teacher=False, img_size=224):
     args.arch = args.arch.removesuffix("_memeff")
-    if args.arch == "vit_huge2":
+    dinov3_archs = {"vit_huge2", "vit_7b"}
+    if args.arch in dinov3_archs:
         dinov3_root = Path("./dinov3")
         if not dinov3_root.exists():
             raise AssertionError(f"expected dinov3 repo at {dinov3_root}")
@@ -29,6 +30,7 @@ def build_model(args, only_teacher=False, img_size=224):
             patch_size=args.patch_size,
             in_chans=getattr(args, "in_chans", 3),
             ffn_ratio=getattr(args, "ffn_ratio", 4.0),
+            qkv_bias=getattr(args, "qkv_bias", True),
             drop_path_rate=getattr(args, "drop_path_rate", 0.0),
             layerscale_init=getattr(args, "layerscale", None),
             norm_layer=getattr(args, "norm_layer", "layernorm"),
