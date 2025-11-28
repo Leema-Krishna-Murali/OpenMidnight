@@ -14,7 +14,7 @@ train:
   centering: sinkhorn_knopp
   use_pretrained: True
   OFFICIAL_EPOCH_LENGTH: 1250
-  num_workers: 10 # should be 4 or less if streaming from HF to avoid too many open files error
+  num_workers: 4 # should be 4 or less if streaming from HF to avoid too many open files error
 student:
   arch: vit_giant2
   patch_size: 14
