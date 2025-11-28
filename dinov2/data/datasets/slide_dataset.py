@@ -56,7 +56,7 @@ class SlideDataset(ExtendedVisionDataset):
         self.image_files = []
 
         #Finishg copying from the .py
-        with open("sample_dataset_30.txt", "r") as f:
+        with open("/data/TCGA/sample_dataset_30.txt", "r") as f:
             for line in f.readlines():
                 self.image_files.append(line)
 

@@ -42,39 +42,15 @@ class hed_mod(torch.nn.Module):
             #Modify channels, each with random amount, between -.05 and .05
             mini =  -.05
             maxi = .05
-            if False:
-                hed_image[..., 0] *= (1 + random.uniform(mini, maxi))#H
-                hed_image[..., 1] *= (1 + random.uniform(mini, maxi))#E
-                hed_image[..., 2] *= (1 + random.uniform(mini, maxi))#D
-            else:
-                hed_image[..., 0] += random.uniform(mini, maxi)#H
-                hed_image[..., 1] += random.uniform(mini, maxi)#E
-                hed_image[..., 2] += random.uniform(mini, maxi)#D
+
+            hed_image[..., 0] += random.uniform(mini, maxi)#H
+            hed_image[..., 1] += random.uniform(mini, maxi)#E
+            hed_image[..., 2] += random.uniform(mini, maxi)#D
 
             #Make sure legit image
             hed_image = np.clip(hed_image, 0, 1)   
             img = hed2rgb(hed_image)
 
-            if False:#debug
-                fig, axes = plt.subplots(1, 2, figsize=(10, 5)) # Adjust figsize as needed
-                axes[0].imshow(img_orig)
-                axes[0].set_title("Before")
-                axes[0].axis('off') # Turn off axis ticks and labels for cleaner image display
-
-                # Plot the "After" image on the second subplot
-                axes[1].imshow(img)
-                axes[1].set_title("After")
-                axes[1].axis('off') # Turn off axis ticks and labels
-
-                # Adjust layout to prevent titles from overlapping
-                plt.tight_layout()
-
-                # Set the overall figure title (optional)
-                fig.suptitle("Image Comparison: Before and After HED Channel Modification", y=1.02) # y adjusts title position
-
-                plt.show()
-                
-                exit()
             img = rearrange(img, 'h w c -> c h w')
             img = torch.from_numpy(img)
             img = torchvision.transforms.functional.to_pil_image(img)
@@ -178,8 +154,7 @@ class DataAugmentationDINO(object):
         #self.global_nohed = transforms.Compose([color_jittering, global_transfo1_extra, self.normalize])
         #self.global_nohed2 = transforms.Compose([color_jittering, global_transfo2_extra, self.normalize])
         #self.local_nohed = transforms.Compose([color_jittering, local_transfo_extra, self.normalize])
-
-        self.hedonly = transforms.Compose([hed_mod(), self.normalize])
+        # self.hedonly = transforms.Compose([hed_mod(), self.normalize])
 
 
 
@@ -196,21 +171,6 @@ class DataAugmentationDINO(object):
 
         output["global_crops"] = [global_crop_1, global_crop_2]
         
-        #print("gloabl crop shapes", global_crop_1.shape)
-        #print(global_crop_2.shape)
-        from torchvision.utils import save_image
-        if False:#Saving
-            image.save("original.png")
-            save_image(self.hedonly(im1_base), "global_hed.png")
-            save_image(self.hedonly(im2_base), "global2_hed.png")
-
-            save_image(global_crop_1, "global.png")
-            save_image(global_crop_2, "global2.png")
-            save_image(self.global_nohed(im1_base), "global1_nohed.png")
-            save_image(self.global_nohed2(im2_base), "global2_nohed.png")
-            save_image(global_crop_1, "global.png")
-            save_image(global_crop_2, "global2.png")
-            exit()
         # global crops for teacher:
         output["global_crops_teacher"] = [global_crop_1, global_crop_2]
 
@@ -218,26 +178,6 @@ class DataAugmentationDINO(object):
         local_crops = [
             self.local_transfo(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
         ]
-        if False:
-            for i, local in enumerate(local_crops):
-                save_image(local, str(i) + "local" + ".png")
-            local_crops_new = [
-                    self.local_nohed(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
-                ]
-
-            local_crops_new2 = [
-                    self.hedonly(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
-                ]
-
-
-            for i, local in enumerate(local_crops_new):
-                save_image(local, str(i) + "localnohed.png")
-            
-            for i, local in enumerate(local_crops_new2):
-                save_image(local, str(i) + "localhed2.png")
-
-                
-            exit()
         output["local_crops"] = local_crops
         output["offsets"] = ()
 

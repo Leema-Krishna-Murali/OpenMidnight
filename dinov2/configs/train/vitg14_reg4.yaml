@@ -9,12 +9,12 @@ ibot:
   separate_head: true
   head_n_prototypes: 131072
 train:
-  streaming_from_hf: False
+  streaming_from_hf: True
   batch_size_per_gpu: 48
   centering: sinkhorn_knopp
   use_pretrained: True
   OFFICIAL_EPOCH_LENGTH: 1250
-  num_workers: 4 # should be 4 or less if streaming from HF to avoid too many open files error
+  num_workers: 10 # should be 4 or less if streaming from HF to avoid too many open files error
 student:
   arch: vit_giant2
   patch_size: 14
@@ -34,4 +34,4 @@ optim:
 crops:
   local_crops_size: 98
 evaluation:
-  eval_period_iterations: 12500 # save checkpoint every 10 epochs
+  eval_period_iterations: 2500 # save checkpoint every 10 epochs

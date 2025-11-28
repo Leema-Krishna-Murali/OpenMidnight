@@ -26,13 +26,18 @@ from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
 
 from dinov2.train.ssl_meta_arch import SSLMetaArch
+from dinov2.models import build_model_from_cfg
 from datasets import IterableDatasetDict, load_dataset, DownloadConfig
 from PIL import Image, ImageOps
 import torch.utils.data
+from torchvision.datasets import folder
+from torchvision.transforms import v2
+from tqdm import tqdm
 
 import pyarrow
 import pyarrow.dataset
 import torch.distributed as dist
+import torch.nn.functional as F
 
 import pyarrow
 import pyarrow.dataset
@@ -215,10 +220,243 @@ def do_test(cfg, model, iteration): # save teacher checkpoint (used for eval onl
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
 
+    if not is_main:
+        return
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bach_root = repo_root / "eva-probe" / "data" / "bach"
+    if not bach_root.is_dir():
+        logger.info("Skipping BACH eval; dataset path missing: %s", bach_root)
+        return
+
+    teacher, _ = build_model_from_cfg(cfg, only_teacher=True)
+    teacher_state = torch.load(teacher_ckp_path, map_location="cpu")["teacher"]
+    teacher_state = {k.replace("module.", ""): v for k, v in teacher_state.items()}
+    teacher_state = {k.replace("backbone.", ""): v for k, v in teacher_state.items() if k.startswith("backbone.")}
+    load_msg = teacher.load_state_dict(teacher_state, strict=False)
+    logger.info("Loaded teacher for BACH eval with msg: %s", load_msg)
+    teacher = teacher.cuda()
+    teacher.eval()
+    teacher.requires_grad_(False)
+    device = next(teacher.parameters()).device
+
+    class _ResizeAndCrop(v2.Compose):
+        def __init__(self, size=224, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
+            self._size = size
+            self._mean = mean
+            self._std = std
+            super().__init__(
+                transforms=[
+                    v2.Resize(size=self._size),
+                    v2.CenterCrop(size=self._size),
+                    v2.PILToTensor(),
+                    v2.ToDtype(torch.float32, scale=True),
+                    v2.Normalize(mean=self._mean, std=self._std),
+                ]
+            )
+
+    _BACH_TRAIN_INDEX_RANGES = [
+        (0, 41),
+        (59, 60),
+        (90, 139),
+        (169, 240),
+        (258, 260),
+        (273, 345),
+        (368, 400),
+    ]
+    _BACH_VAL_INDEX_RANGES = [
+        (41, 59),
+        (60, 90),
+        (139, 169),
+        (240, 258),
+        (260, 273),
+        (345, 368),
+    ]
+    _BACH_CLASS_TO_IDX = {"Benign": 0, "InSitu": 1, "Invasive": 2, "Normal": 3}
+
+    class _BACHDataset(torch.utils.data.Dataset):
+        def __init__(self, root, split, transform):
+            self.root = os.path.abspath(os.path.expanduser(root))
+            self.split = split
+            self.transform = transform
+            dataset_path = os.path.join(self.root, "ICIAR2018_BACH_Challenge", "Photos")
+            self.samples = folder.make_dataset(
+                directory=dataset_path,
+                class_to_idx=_BACH_CLASS_TO_IDX,
+                extensions=(".tif",),
+            )
+            if len(self.samples) == 0:
+                raise RuntimeError(f"No BACH images found in {dataset_path}")
+            if split == "train":
+                index_ranges = _BACH_TRAIN_INDEX_RANGES
+            elif split == "val":
+                index_ranges = _BACH_VAL_INDEX_RANGES
+            else:
+                raise ValueError("Invalid BACH split. Use 'train' or 'val'.")
+            indices = []
+            for start, end in index_ranges:
+                indices.extend(range(start, end))
+            self.indices = indices
+
+        def __len__(self):
+            return len(self.indices)
+
+        def __getitem__(self, idx):
+            image_path, target = self.samples[self.indices[idx]]
+            image = Image.open(image_path).convert("RGB")
+            if self.transform is not None:
+                image = self.transform(image)
+            target_tensor = torch.tensor(target, dtype=torch.long)
+            return image, target_tensor
+
+    transform = _ResizeAndCrop(
+        size=224,
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+    )
+
+    train_ds = _BACHDataset(root=str(bach_root), split="train", transform=transform)
+    val_ds = _BACHDataset(root=str(bach_root), split="val", transform=transform)
+
+    predict_batch_size = 64
+    num_workers = 4
+
+    def _compute_embeddings(dataset):
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=predict_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+        feats = []
+        targets = []
+        with torch.no_grad():
+            for images, labels in loader:
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                out = teacher(images, is_training=True)
+                cls = out["x_norm_clstoken"]
+                feats.append(cls)
+                targets.append(labels)
+        feats = torch.cat(feats, dim=0)
+        targets = torch.cat(targets, dim=0)
+        return feats, targets
+
+    train_feats, train_targets = _compute_embeddings(train_ds)
+    val_feats, val_targets = _compute_embeddings(val_ds)
+
+    in_features = train_feats.shape[-1]
+    num_classes = 4
+    head = torch.nn.Linear(in_features, num_classes, bias=True).to(device)
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.AdamW(head.parameters(), lr=3e-4, weight_decay=1e-2)
+
+    train_dataset = torch.utils.data.TensorDataset(train_feats, train_targets)
+    train_batch_size = 256
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=train_batch_size,
+        shuffle=True,
+        drop_last=False,
+    )
+
+    val_dataset = torch.utils.data.TensorDataset(val_feats, val_targets)
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=train_batch_size,
+        shuffle=False,
+        drop_last=False,
+    )
+
+    def _eval_head():
+        head.eval()
+        all_preds = []
+        all_targets = []
+        with torch.no_grad():
+            for feats_batch, targets_batch in val_loader:
+                feats_batch = feats_batch.to(device, non_blocking=True)
+                logits = head(feats_batch)
+                preds = logits.argmax(dim=1).cpu()
+                all_preds.append(preds)
+                all_targets.append(targets_batch.cpu())
+        preds = torch.cat(all_preds, dim=0)
+        targets = torch.cat(all_targets, dim=0)
+        plain_acc = float((preds == targets).float().mean().item())
+        conf = torch.zeros(num_classes, num_classes, dtype=torch.long)
+        indices = targets * num_classes + preds
+        bincount = torch.bincount(indices, minlength=num_classes * num_classes)
+        conf = bincount.view(num_classes, num_classes)
+        per_class = conf.diag().float() / conf.sum(dim=1).clamp_min(1)
+        balanced_acc = float(per_class.mean().item())
+        head.train()
+        return plain_acc, balanced_acc
+
+    max_steps = 12500  # eva uses 12500 steps with patience-based early stopping
+    eval_every = 250
+    patience = 1250
+    steps = 0
+    best_plain = -1.0
+    best_balanced = -1.0
+    best_state = None
+    steps_since_improve = 0
+    head.train()
+    with tqdm(total=max_steps) as pbar:
+        while steps < max_steps:
+            for feats_batch, targets_batch in train_loader:
+                feats_batch = feats_batch.to(device, non_blocking=True)
+                targets_batch = targets_batch.to(device, non_blocking=True)
+                logits = head(feats_batch)
+                loss = criterion(logits, targets_batch)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                steps += 1
+                pbar.update(1)
+                if steps % eval_every == 0 or steps >= max_steps:
+                    plain_acc, balanced_acc = _eval_head()
+                    if plain_acc > best_plain:
+                        best_plain = plain_acc
+                        best_balanced = balanced_acc
+                        best_state = {k: v.cpu() for k, v in head.state_dict().items()}
+                        steps_since_improve = 0
+                    else:
+                        steps_since_improve += eval_every
+                    if steps_since_improve >= patience:
+                        steps = max_steps
+                        break
+                if steps >= max_steps:
+                    break
+
+    if best_state is not None:
+        head.load_state_dict(best_state)
+        bach_acc_plain, bach_acc_balanced = best_plain, best_balanced
+    else:
+        bach_acc_plain, bach_acc_balanced = _eval_head()
+
+    logger.info(
+        "BACH val accuracy (linear probe): plain=%.4f balanced=%.4f",
+        bach_acc_plain,
+        bach_acc_balanced,
+    )
+
+    if wandb.run is not None and distributed.is_main_process():
+        if isinstance(iteration, int):
+            step = iteration
+        else:
+            step = int(str(iteration).split("_")[-1])
+        wandb.log(
+            {
+                "val/BACH_BALANCED_ACCURACY": bach_acc_balanced,
+                "val/BACH_MULTICLASS_ACCURACY": bach_acc_plain,
+            },
+            step=step,
+        )
+
 
 def do_train(cfg, model, resume=False):
     model.train()
-    inputs_dtype = torch.half
+    inputs_dtype = torch.bfloat16
     fp16_scaler = model.fp16_scaler  # for mixed precision training
     single_gpu_run = distributed.get_global_size() <= 1
     if single_gpu_run: print("\n\nSINGLE GPU RUN, SKIPPING FSDP CHECKPOINTING\n\n")
@@ -311,7 +549,7 @@ def do_train(cfg, model, resume=False):
     if cfg.train.streaming_from_hf:
         dataset_builder = partial(
             _build_streaming_dataset,
-            dataset_path="medarc/TCGA-12K-parquet",
+            dataset_path="/data/TCGA_parquet_sample30_shuffled",#"medarc/TCGA-12K-parquet-shuffled",
             shuffle_buffer=50000,                   
             base_seed=42, 
         )
@@ -440,6 +678,13 @@ def do_train(cfg, model, resume=False):
             if not single_gpu_run:
                 checkpointer.save(f"model_{iteration:07d}", iteration=iteration)
             break
+
+        #Save instantly
+        if cfg.evaluation.eval_period_iterations >= 0 and (iteration) % cfg.evaluation.eval_period_iterations == 0:
+            do_test(cfg, model, f"training_{iteration}")
+            torch.cuda.synchronize()
+        if not single_gpu_run:
+            periodic_checkpointer.step(iteration)
         
         current_batch_size = data["collated_global_crops"].shape[0] / 2
         if iteration > max_iter:
@@ -523,13 +768,6 @@ def do_train(cfg, model, resume=False):
     
         # Synchronize the GPU to ensure all operations are complete before measuring
         torch.cuda.synchronize()
-        
-        #Save instantly
-        if cfg.evaluation.eval_period_iterations >= 0 and (iteration) % cfg.evaluation.eval_period_iterations == 0:
-            do_test(cfg, model, f"training_{iteration}")
-            torch.cuda.synchronize()
-        if not single_gpu_run:
-            periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1
     metric_logger.synchronize_between_processes()
@@ -538,6 +776,13 @@ def do_train(cfg, model, resume=False):
 
 def main(args):
     cfg = setup(args)
+    if cfg.student.arch == "vit_huge2":
+        for section in ("teacher", "student"):
+            for sub in ("backbone", "dino_head", "ibot_head"):
+                mp = getattr(cfg.compute_precision[section], sub).mixed_precision
+                mp.param_dtype = "bf16"
+                mp.reduce_dtype = "bf16"
+                mp.buffer_dtype = "fp32"
     print(cfg)
     model = SSLMetaArch(cfg).to(torch.device("cuda"))
     #Load model here from pretrained.
@@ -546,55 +791,93 @@ def main(args):
         if cfg.student.arch == "vit_giant2":
             print("loading pretrained DinoV2-giant") 
             model_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg')
+            model_pretrained = model_pretrained.to(torch.device("cuda"))
+            model.student.backbone.patch_embed.proj.weight = model_pretrained.patch_embed.proj.weight
+            model.student.backbone.patch_embed.proj.bias = model_pretrained.patch_embed.proj.bias
+            model.student.backbone.cls_token = model_pretrained.cls_token
+            model.student.backbone.register_tokens = model_pretrained.register_tokens
+            model.student.backbone.mask_token = model_pretrained.mask_token
+
+            print(model.state_dict().keys())
+            print(model_pretrained.state_dict().keys())
+            print(model_pretrained.pos_embed.shape) #1, 1360, 384. We lose pos embed because it was 518
+            print(model.student.backbone.pos_embed.shape) #1, 257, 384
+
+            # Interpolate pretrained positional embeddings to the current patch grid
+            with torch.no_grad():
+                pos_embed_pretrained = model_pretrained.pos_embed.detach()
+                n_extra_tokens = 1  # cls token
+                cls_pos_embed = pos_embed_pretrained[:, :n_extra_tokens]
+                patch_pos_embed = pos_embed_pretrained[:, n_extra_tokens:]
+
+                # Original grid size (assumes square)
+                orig_size = int(patch_pos_embed.shape[1] ** 0.5)
+                patch_pos_embed = patch_pos_embed.reshape(1, orig_size, orig_size, -1).permute(0, 3, 1, 2)
+
+                # Target grid size from the current model
+                target_h, target_w = model.student.backbone.patch_embed.patches_resolution
+                resized_patch_pos_embed = F.interpolate(
+                    patch_pos_embed,
+                    size=(target_h, target_w),
+                    mode="bicubic",
+                    align_corners=False,
+                    antialias=getattr(model_pretrained, "interpolate_antialias", False),
+                )
+                resized_patch_pos_embed = resized_patch_pos_embed.permute(0, 2, 3, 1).reshape(
+                    1, target_h * target_w, -1
+                )
+                new_pos_embed = torch.cat((cls_pos_embed, resized_patch_pos_embed), dim=1)
+
+                model.student.backbone.pos_embed = torch.nn.Parameter(new_pos_embed.clone())
+                model.teacher.backbone.pos_embed = torch.nn.Parameter(new_pos_embed.clone())
+
+            # We need to make sure we grab *all* of the keys.
+            # For each block, copy weights over.
+            layers = []
+            for layer in model_pretrained.blocks:
+                layers.append(layer)
+            i = 0
+            for layer in model.student.backbone.blocks:
+                for sublayer in layer:
+                    if type(sublayer) != torch.nn.Identity:
+                        current = layers.pop(0)
+                        sublayer.norm1.weight = current.norm1.weight
+                        sublayer.norm1.bias = current.norm1.bias
+                        sublayer.attn.qkv.weight = current.attn.qkv.weight
+                        sublayer.attn.qkv.bias =  current.attn.qkv.bias
+                        sublayer.attn.proj.weight = current.attn.proj.weight
+                        sublayer.attn.proj.bias = current.attn.proj.bias
+                        sublayer.norm2.weight = current.norm2.weight
+                        sublayer.norm2.bias = current.norm2.bias
+                        try:
+                            sublayer.mlp.fc1.weight = current.mlp.fc1.weight
+                            sublayer.mlp.fc2.weight = current.mlp.fc2.weight
+                            sublayer.mlp.fc1.bias = current.mlp.fc1.bias
+                            sublayer.mlp.fc2.bias = current.mlp.fc2.bias
+                        except:
+                            sublayer.mlp.w12.weight = current.mlp.w12.weight
+                            sublayer.mlp.w12.bias = current.mlp.w12.bias
+                            sublayer.mlp.w3.weight = current.mlp.w3.weight
+                            sublayer.mlp.w3.bias = current.mlp.w3.bias
+                        sublayer.ls1.gamma = current.ls1.gamma
+                        sublayer.ls2.gamma = current.ls2.gamma
+
+
+            model.student.backbone.norm.weight = model_pretrained.norm.weight
+            model.student.backbone.norm.bias = model_pretrained.norm.bias 
+
+        elif cfg.student.arch == "vit_huge2":
+            pretrained_ckpt = getattr(cfg.train, "pretrained_teacher_ckpt", "")
+            if pretrained_ckpt == "":
+                raise AssertionError("train.pretrained_teacher_ckpt must be set for vit_huge2")
+            print(f"loading pretrained DINOv3 vit_huge2 from {pretrained_ckpt}")
+            teacher_state = torch.load(pretrained_ckpt, map_location=torch.device("cpu"))["teacher"]
+            backbone_state = {k.replace("backbone.", ""): v for k, v in teacher_state.items() if k.startswith("backbone.")}
+            # load only backbone; heads initialized from scratch
+            model.student.backbone.load_state_dict(backbone_state, strict=True)
+            model.teacher.backbone.load_state_dict(backbone_state, strict=True)
         else:
-            AssertionError("only giant pretrained is supported currently")
-
-        model_pretrained = model_pretrained.to(torch.device("cuda"))
-        model.student.backbone.patch_embed.proj.weight = model_pretrained.patch_embed.proj.weight
-        model.student.backbone.patch_embed.proj.bias = model_pretrained.patch_embed.proj.bias
-        model.student.backbone.cls_token = model_pretrained.cls_token
-        model.student.backbone.register_tokens = model_pretrained.register_tokens
-        model.student.backbone.mask_token = model_pretrained.mask_token
-
-        print(model.state_dict().keys())
-        print(model_pretrained.state_dict().keys())
-        print(model_pretrained.pos_embed.shape) #1, 1360, 384. We lose pos embed because it was 518
-        print(model.student.backbone.pos_embed.shape) #1, 257, 384
-
-        # We need to make sure we grab *all* of the keys.
-        # For each block, copy weights over.
-        layers = []
-        for layer in model_pretrained.blocks:
-            layers.append(layer)
-        i = 0
-        for layer in model.student.backbone.blocks:
-            for sublayer in layer:
-                if type(sublayer) != torch.nn.Identity:
-                    current = layers.pop(0)
-                    sublayer.norm1.weight = current.norm1.weight
-                    sublayer.norm1.bias = current.norm1.bias
-                    sublayer.attn.qkv.weight = current.attn.qkv.weight
-                    sublayer.attn.qkv.bias =  current.attn.qkv.bias
-                    sublayer.attn.proj.weight = current.attn.proj.weight
-                    sublayer.attn.proj.bias = current.attn.proj.bias
-                    sublayer.norm2.weight = current.norm2.weight
-                    sublayer.norm2.bias = current.norm2.bias
-                    try:
-                        sublayer.mlp.fc1.weight = current.mlp.fc1.weight
-                        sublayer.mlp.fc2.weight = current.mlp.fc2.weight
-                        sublayer.mlp.fc1.bias = current.mlp.fc1.bias
-                        sublayer.mlp.fc2.bias = current.mlp.fc2.bias
-                    except:
-                        sublayer.mlp.w12.weight = current.mlp.w12.weight
-                        sublayer.mlp.w12.bias = current.mlp.w12.bias
-                        sublayer.mlp.w3.weight = current.mlp.w3.weight
-                        sublayer.mlp.w3.bias = current.mlp.w3.bias
-                    sublayer.ls1.gamma = current.ls1.gamma
-                    sublayer.ls2.gamma = current.ls2.gamma
-
-
-        model.student.backbone.norm.weight = model_pretrained.norm.weight
-        model.student.backbone.norm.bias = model_pretrained.norm.bias 
+            raise AssertionError("pretrained loading only supports vit_giant2 or vit_huge2")
 
     model.prepare_for_distributed_training()
     logger.info("Model:\n{}".format(model))
