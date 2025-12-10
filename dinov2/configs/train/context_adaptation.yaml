@@ -1,0 +1,68 @@
+# Context Adaptation Training Config
+# Trains a context-ViT to process 3584x3584 regions using OpenMidnight patch embeddings
+
+data:
+  tcga_root: /data/TCGA
+  sample_list: /data/TCGA/sample_dataset_30.txt
+  region_size: 3584  # 16x16 grid of 224x224 patches
+  patch_size: 224
+  patches_per_side: 16  # 3584 / 224 = 16
+  num_patches_per_region: 256  # 16 * 16
+
+patch_vit:
+  checkpoint: /home/paul/OpenMidnight/checkpoints/teacher_epoch250000.pth
+  arch: vit_giant2
+  patch_size: 14  # ViT internal patch size
+  embed_dim: 1536
+  num_register_tokens: 4
+  freeze: true  # Keep OpenMidnight frozen
+
+context_vit:
+  # Smaller ViT for processing the 256 patch embeddings
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  drop_path_rate: 0.1
+
+mae_decoder:
+  embed_dim: 512
+  depth: 4
+  num_heads: 8
+
+train:
+  batch_size_per_gpu: 16  # num regions per GPU (each region = 256 patches)
+  num_workers: 4
+  epochs: 100
+  OFFICIAL_EPOCH_LENGTH: 1000
+  output_dir: /home/paul/OpenMidnight/outputs/context_adaptation
+
+optim:
+  base_lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.05
+  weight_decay_end: 0.05
+  warmup_epochs: 5
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+  clip_grad: 3.0
+
+loss:
+  # Contrastive loss weights
+  contrastive_weight: 1.0
+  contrastive_temperature: 0.07
+  # Spatial contrastive: distance-weighted positives within region
+  spatial_distance_scale: 4.0  # larger => slower decay with distance
+  # MAE loss
+  mae_weight: 1.0
+  mae_mask_ratio: 0.75  # mask 75% of patches for reconstruction
+  mae_num_masked_samples: 0.25  # fraction of regions to perform masking on mae_mask_ratio percent of its patches; forces min=2
+
+evaluation:
+  save_period_epochs: 5
+  debug_save_images: true  # save debug images initially
+  debug_save_dir: /home/paul/OpenMidnight/outputs/context_adaptation/debug_images
+
+wandb:
+  project: openmidnight-context
+  entity: null  # will use default
