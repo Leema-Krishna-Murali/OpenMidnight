@@ -133,7 +133,7 @@ class SSLMetaArch(nn.Module):
         else:
             loss.backward()
 
-    def forward_backward(self, images, teacher_temp):
+    def forward_backward(self, images, teacher_temp, freeze_student_backbone=False):
         n_global_crops = 2
         assert n_global_crops == 2
         n_local_crops = self.cfg.crops.local_crops_number
@@ -236,9 +236,15 @@ class SSLMetaArch(nn.Module):
         loss_dict = {}
 
         loss_accumulator = 0  # for backprop
-        student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
-            [global_crops, local_crops], masks=[masks, None], is_training=True
-        )
+        if freeze_student_backbone:
+            with torch.no_grad():
+                student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
+                    [global_crops, local_crops], masks=[masks, None], is_training=True
+                )
+        else:
+            student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
+                [global_crops, local_crops], masks=[masks, None], is_training=True
+            )
 
         inputs_for_student_head_list = []
 

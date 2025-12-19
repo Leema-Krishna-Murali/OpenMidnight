@@ -15,18 +15,18 @@ ibot:
   head_n_prototypes: 131072 
 train:
   sample_list_path: /data/TCGA/sample_dataset_ablation.txt # gives paths to svs files for data loading if streaming_from_hf=False
-  streaming_from_hf: true
-  streaming_dataset_path: medarc/TCGA-12K-parquet
+  streaming_from_hf: True
+  streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled
   batch_size_per_gpu: 256 # assuming 1-gpu; if training with full 8-gpu node decrease to 32 to keep same global batch size across ablations 
   centering: sinkhorn_knopp
-  use_pretrained: True
-  OFFICIAL_EPOCH_LENGTH: 500
+  use_pretrained: False ##########True
+  OFFICIAL_EPOCH_LENGTH: 500 
   num_workers: 4
   skip_checkpointer: true
 student:
   arch: vit_small
   patch_size: 14
-  drop_path_rate: 0.1
+  drop_path_rate: 0.1 # 0.4
   ffn_layer: mlp
   block_chunks: 4
   num_register_tokens: 4
@@ -57,4 +57,4 @@ crops:
   local_crops_size: 98
 evaluation:
   eval_period_iterations: 2500 # save checkpoint every x iterations
-  bach_root: /data/eva-data/bach # assuming you want continuous Bach validation; change to abs path to folder containing "ICIAR2018_BACH_Challenge" 
+  bach_root: /data/eva-data/bach

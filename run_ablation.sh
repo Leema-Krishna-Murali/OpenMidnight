@@ -7,13 +7,13 @@ export MASTER_PORT=29500
 
 export NNODES=1 # number of nodes you are using
 export NPROC_PER_NODE=1 # number of GPUs per node
-export CUDA_VISIBLE_DEVICES="0" # specific devices to use on this node
+export CUDA_VISIBLE_DEVICES="0" #,1,2,3,4,5,6,7" # specific devices to use on this node
 export NODE_RANK=0 # the node running this script will be master node (rank 0)
 
 # Training config
 CONFIG_FILE="./dinov2/configs/train/vits14_reg_ablations.yaml"
-OUTPUT_DIR="./output_ablation"
-RESUME="True" # set string to "True" to resume from last checkpoint in OUTPUT_DIR if it exists
+OUTPUT_DIR="./output_ablation_scratch"
+RESUME="False" # set string to "True" to resume from last checkpoint in OUTPUT_DIR if it exists
 
 # Set Python path for imports
 # Provide script path so train.py can attach the right launcher script to WandB.

@@ -13,6 +13,8 @@ Lines that include MPP metadata from the ablation sampler are also accepted:
 
 The script opens every referenced slide once, extracts a 224x224 RGB patch at the
 requested coordinates/level, and writes the samples into per-task Parquet files.
+MPP values from the spec (or reconstructed from slide metadata) are preserved
+as mpp_x/mpp_y columns in the output.
 It supports PNG/JPEG/raw outputs, task chunking, resume markers, and optional
 multi-processing. Results land in /data/TCGA_parquet_sample30/ unless overridden.
 """
@@ -38,12 +40,17 @@ import pyarrow.parquet as pq
 from openslide import OpenSlide
 
 
+MPP_X_KEY = "openslide.mpp-x"
+MPP_Y_KEY = "openslide.mpp-y"
+
 @dataclass(frozen=True)
 class PatchSpec:
     slide_path: str
     x: int
     y: int
     level: int
+    mpp_x: float | None = None
+    mpp_y: float | None = None
 
 
 @dataclass(frozen=True)
@@ -129,11 +136,21 @@ def parse_specs(spec_file: Path) -> List[PatchSpec]:
             parts = line.split()
             if len(parts) == 4:
                 slide_path, x, y, level = parts
+                mpp_x = mpp_y = None
             elif len(parts) == 6:
-                slide_path, x, y, level, *_mpp = parts
+                slide_path, x, y, level, mpp_x, mpp_y = parts
             else:
                 raise ValueError(f"Invalid spec line {idx}: {line}")
-            specs.append(PatchSpec(slide_path, int(x), int(y), int(level)))
+            specs.append(
+                PatchSpec(
+                    slide_path=slide_path,
+                    x=int(x),
+                    y=int(y),
+                    level=int(level),
+                    mpp_x=None if len(parts) == 4 else float(mpp_x),
+                    mpp_y=None if len(parts) == 4 else float(mpp_y),
+                )
+            )
     if not specs:
         raise ValueError(f"No patch specifications found in {spec_file}")
     logging.info("Parsed %d patch specifications from %s.", len(specs), spec_file)
@@ -213,8 +230,13 @@ def process_task_worker(
     levels: List[int] = []
     tile_sizes: List[int] = []
     level_downsamples: List[float] = []
+    mpp_xs: List[float | None] = []
+    mpp_ys: List[float | None] = []
     image_bytes: List[bytes] = []
     image_dtypes: List[str] = []
+
+    base_mpp_x = slide.properties.get(MPP_X_KEY)
+    base_mpp_y = slide.properties.get(MPP_Y_KEY)
 
     for spec in specs:
         if spec.level < 0 or spec.level >= slide.level_count:
@@ -223,13 +245,23 @@ def process_task_worker(
             (spec.x, spec.y), spec.level, (config.tile_size, config.tile_size)
         ).convert("RGB")
 
+        downsample = float(slide.level_downsamples[spec.level])
+        computed_mpp_x = spec.mpp_x
+        computed_mpp_y = spec.mpp_y
+        if computed_mpp_x is None and base_mpp_x is not None:
+            computed_mpp_x = float(base_mpp_x) * downsample
+        if computed_mpp_y is None and base_mpp_y is not None:
+            computed_mpp_y = float(base_mpp_y) * downsample
+
         task_ids.append(task_id)
         slide_paths.append(slide_path)
         xs.append(spec.x)
         ys.append(spec.y)
         levels.append(spec.level)
         tile_sizes.append(config.tile_size)
-        level_downsamples.append(float(slide.level_downsamples[spec.level]))
+        level_downsamples.append(downsample)
+        mpp_xs.append(computed_mpp_x)
+        mpp_ys.append(computed_mpp_y)
 
         if config.encoding == "png":
             buf.seek(0)
@@ -257,6 +289,8 @@ def process_task_worker(
             "level": pa.array(levels, type=pa.int32()),
             "tile_size": pa.array(tile_sizes, type=pa.int32()),
             "level_downsample": pa.array(level_downsamples, type=pa.float32()),
+            "mpp_x": pa.array(mpp_xs, type=pa.float32()),
+            "mpp_y": pa.array(mpp_ys, type=pa.float32()),
             "image_dtype": pa.array(image_dtypes, type=pa.string()),
             "image_bytes": pa.array(image_bytes, type=pa.binary()),
         }

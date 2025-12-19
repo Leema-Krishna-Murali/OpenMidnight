@@ -818,7 +818,10 @@ def do_train(cfg, model, resume=False):
 
         optimizer.zero_grad(set_to_none=True)
 
-        loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
+        loss_dict = model.forward_backward(
+            data,
+            teacher_temp=teacher_temp,
+        )
 
         # clip gradients
 

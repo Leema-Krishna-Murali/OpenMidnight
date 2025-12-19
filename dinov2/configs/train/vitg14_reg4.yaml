@@ -16,8 +16,8 @@ ibot:
 train:
   sample_list_path: /data/TCGA/sample_dataset_30.txt # gives paths to svs files for data loading if streaming_from_hf=False
   streaming_from_hf: true
-  streaming_dataset_path: medarc/TCGA-12K-parquet
-  batch_size_per_gpu: 384
+  streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled
+  batch_size_per_gpu: 48
   centering: sinkhorn_knopp
   use_pretrained: True
   OFFICIAL_EPOCH_LENGTH: 1250
