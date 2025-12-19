@@ -217,7 +217,8 @@ class BRACSContextDataset(Dataset):
         ])
 
         # Clean up
-        os.remove(tmp_csv_path)
+        if os.path.exists(tmp_csv_path):
+            os.remove(tmp_csv_path)
     
     def __len__(self) -> int:
         return len(self.meta_df)
@@ -243,7 +244,8 @@ class BRACSContextDataset(Dataset):
             img = Image.open(tmp_patch).convert("RGB")
             patch_tensor = self.transform(img)
 
-            os.remove(tmp_patch)
+            if os.path.exists(tmp_patch):
+                os.remove(tmp_patch)
 
             return patch_tensor, label, idx
 
