@@ -19,7 +19,7 @@ train:
   streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled
   batch_size_per_gpu: 256 # assuming 1-gpu; if training with full 8-gpu node decrease to 32 to keep same global batch size across ablations 
   centering: sinkhorn_knopp
-  use_pretrained: False ##########True
+  use_pretrained: True
   OFFICIAL_EPOCH_LENGTH: 500 
   num_workers: 4
   skip_checkpointer: true
@@ -39,7 +39,7 @@ teacher:
   warmup_teacher_temp_epochs: 30
 optim:
   epochs: 2000 
-  early_stop: 50
+  early_stop: 150
   weight_decay_end: 0.2
   base_lr: 8.0e-4
   warmup_epochs: 3

@@ -3,16 +3,16 @@ set -euo pipefail
 
 # Master node configuration 
 export MASTER_ADDR=$(hostname -I | awk '{print $1}')
-export MASTER_PORT=29500
+export MASTER_PORT=29501
 
 export NNODES=1 # number of nodes you are using
 export NPROC_PER_NODE=1 # number of GPUs per node
-export CUDA_VISIBLE_DEVICES="0" #,1,2,3,4,5,6,7" # specific devices to use on this node
+export CUDA_VISIBLE_DEVICES="1" #,1,2,3,4,5,6,7" # specific devices to use on this node
 export NODE_RANK=0 # the node running this script will be master node (rank 0)
 
 # Training config
 CONFIG_FILE="./dinov2/configs/train/vits14_reg_ablations.yaml"
-OUTPUT_DIR="./output_ablation_scratch"
+OUTPUT_DIR="./output_ablation1"
 RESUME="False" # set string to "True" to resume from last checkpoint in OUTPUT_DIR if it exists
 
 # Set Python path for imports

@@ -13,8 +13,8 @@ Lines that include MPP metadata from the ablation sampler are also accepted:
 
 The script opens every referenced slide once, extracts a 224x224 RGB patch at the
 requested coordinates/level, and writes the samples into per-task Parquet files.
-MPP values from the spec (or reconstructed from slide metadata) are preserved
-as mpp_x/mpp_y columns in the output.
+MPP values in the spec are treated as target MPPs, so regions may be read larger
+and downsampled back to 224. Output mpp_x/mpp_y reflect the resulting patch MPP.
 It supports PNG/JPEG/raw outputs, task chunking, resume markers, and optional
 multi-processing. Results land in /data/TCGA_parquet_sample30/ unless overridden.
 """
@@ -38,10 +38,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from openslide import OpenSlide
+from PIL import Image
 
 
 MPP_X_KEY = "openslide.mpp-x"
 MPP_Y_KEY = "openslide.mpp-y"
+MPP_metadata = False # Set to True to enable MPP-aware reading and output.
 
 @dataclass(frozen=True)
 class PatchSpec:
@@ -235,23 +237,43 @@ def process_task_worker(
     image_bytes: List[bytes] = []
     image_dtypes: List[str] = []
 
-    base_mpp_x = slide.properties.get(MPP_X_KEY)
-    base_mpp_y = slide.properties.get(MPP_Y_KEY)
+    if MPP_metadata:
+        base_mpp_x = slide.properties.get(MPP_X_KEY)
+        base_mpp_y = slide.properties.get(MPP_Y_KEY)
+        if base_mpp_x is None or base_mpp_y is None:
+            raise ValueError(f"Missing MPP metadata for {slide_path}")
+    else:
+        base_mpp_x = None
+        base_mpp_y = None
 
     for spec in specs:
         if spec.level < 0 or spec.level >= slide.level_count:
             raise ValueError(f"Level {spec.level} invalid for {slide_path}")
-        region = slide.read_region(
-            (spec.x, spec.y), spec.level, (config.tile_size, config.tile_size)
-        ).convert("RGB")
-
         downsample = float(slide.level_downsamples[spec.level])
-        computed_mpp_x = spec.mpp_x
-        computed_mpp_y = spec.mpp_y
-        if computed_mpp_x is None and base_mpp_x is not None:
-            computed_mpp_x = float(base_mpp_x) * downsample
-        if computed_mpp_y is None and base_mpp_y is not None:
-            computed_mpp_y = float(base_mpp_y) * downsample
+        if MPP_metadata:
+            level_mpp_x = float(base_mpp_x) * downsample
+            level_mpp_y = float(base_mpp_y) * downsample
+            target_mpp_x = level_mpp_x if spec.mpp_x is None else spec.mpp_x
+            target_mpp_y = level_mpp_y if spec.mpp_y is None else spec.mpp_y
+            read_w = int(round(config.tile_size * target_mpp_x / level_mpp_x))
+            read_h = int(round(config.tile_size * target_mpp_y / level_mpp_y))
+            if read_w < config.tile_size:
+                read_w = config.tile_size
+            if read_h < config.tile_size:
+                read_h = config.tile_size
+            region = slide.read_region((spec.x, spec.y), spec.level, (read_w, read_h)).convert("RGB")
+            if read_w != config.tile_size or read_h != config.tile_size:
+                region = region.resize((config.tile_size, config.tile_size), resample=Image.BICUBIC)
+            computed_mpp_x = level_mpp_x * (read_w / config.tile_size)
+            computed_mpp_y = level_mpp_y * (read_h / config.tile_size)
+        else:
+            region = slide.read_region(
+                (spec.x, spec.y),
+                spec.level,
+                (config.tile_size, config.tile_size),
+            ).convert("RGB")
+            computed_mpp_x = None
+            computed_mpp_y = None
 
         task_ids.append(task_id)
         slide_paths.append(slide_path)
@@ -558,11 +580,12 @@ if __name__ == "__main__":
     main()
 
 # python3 build_parquet_sample_dataset.py \
-#   --spec-file /data/TCGA/sample_dataset_ablation.txt \
-#   --output-dir /data/TCGA_ablations_baseline/ \
+#   --spec-file /data/TCGA/sample_dataset_25M_256x256.txt \
+#   --output-dir /home/paul/OpenMidnight/TCGA_parquet_25M_256x256/ \
 #   --encoding jpeg \
 #   --shuffle-tasks \
 #   --num-workers 32 \
+#   --tile-size 256 \
 #   --max-open-slides 1 \
 #   --start-method spawn \
 #   --mode append \
