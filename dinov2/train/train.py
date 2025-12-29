@@ -438,6 +438,26 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
         param_group["weight_decay"] = wd * wd_multiplier
         param_group["lr"] = (last_layer_lr if is_last_layer else lr) * lr_multiplier
 
+
+def _iter_vit_blocks(backbone):
+    if backbone.chunked_blocks:
+        for chunk in backbone.blocks:
+            for blk in chunk:
+                if not isinstance(blk, torch.nn.Identity):
+                    yield blk
+    else:
+        for blk in backbone.blocks:
+            yield blk
+
+
+def _mlp_kind(block):
+    if hasattr(block.mlp, "fc1"):
+        return "mlp"
+    if hasattr(block.mlp, "w12"):
+        return "swiglu"
+    raise AssertionError("Unsupported FFN block type")
+
+
 _FULL_STATE_DICT_CFG = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
 
 _HUB_ARCH_NAMES = {
@@ -460,23 +480,118 @@ def _resolve_torchhub_name(cfg):
     return f"dinov2_{hub_arch}{cfg.student.patch_size}{reg_suffix}"
 
 
-def _load_pretrained_backbone(cfg, model):
-    def _iter_vit_blocks(backbone):
-        if backbone.chunked_blocks:
-            for chunk in backbone.blocks:
-                for blk in chunk:
-                    if not isinstance(blk, torch.nn.Identity):
-                        yield blk
-        else:
-            for blk in backbone.blocks:
-                yield blk
+def _load_pixio_pretrained_backbone(cfg, model):
+    ckpt_path = cfg.train.pretrained_ckpt
+    logger.info("Loading pixio pretrained backbone from: %s", ckpt_path)
+    state_dict = torch.load(ckpt_path, map_location="cpu")
 
-    def _mlp_kind(block):
-        if hasattr(block.mlp, "fc1"):
-            return "mlp"
-        if hasattr(block.mlp, "w12"):
-            return "swiglu"
-        raise AssertionError("Unsupported FFN block type")
+    if hasattr(model, "teacher"):
+        student_backbone = model.student.backbone
+    elif hasattr(model, "backbone"):
+        student_backbone = model.backbone
+    else:
+        raise ValueError("Pretrained load expects model with teacher or backbone")
+
+    device = next(model.parameters()).device
+    pixio_cls = state_dict["cls_token"].to(device)
+    pixio_pos = state_dict["pos_embed"].to(device)
+
+    num_prefix_tokens = pixio_cls.shape[1]
+    if pixio_pos.shape[1] <= num_prefix_tokens:
+        raise AssertionError("Pixio pos_embed does not contain patch tokens")
+    if student_backbone.embed_dim != pixio_cls.shape[-1]:
+        raise AssertionError("Pixio embed_dim mismatch")
+    if student_backbone.num_register_tokens != num_prefix_tokens - 1:
+        raise AssertionError(
+            "Pixio expects num_register_tokens == cls_tokens - 1 "
+            f"(got {student_backbone.num_register_tokens}, cls_tokens={num_prefix_tokens})"
+        )
+
+    patch_weight = state_dict["patch_embed.proj.weight"].to(device)
+    patch_bias = state_dict["patch_embed.proj.bias"].to(device)
+    if student_backbone.patch_embed.proj.weight.shape != patch_weight.shape:
+        raise AssertionError("Pixio patch_embed weight shape mismatch")
+    if student_backbone.patch_embed.proj.bias.shape != patch_bias.shape:
+        raise AssertionError("Pixio patch_embed bias shape mismatch")
+
+    with torch.no_grad():
+        student_backbone.patch_embed.proj.weight.copy_(patch_weight)
+        student_backbone.patch_embed.proj.bias.copy_(patch_bias)
+        student_backbone.cls_token.copy_(pixio_cls[:, :1, :])
+        if student_backbone.num_register_tokens:
+            reg_tokens = pixio_cls[:, 1 : 1 + student_backbone.num_register_tokens, :]
+            reg_pos = pixio_pos[:, 1 : 1 + student_backbone.num_register_tokens, :]
+            student_backbone.register_tokens.copy_(reg_tokens + reg_pos)
+
+        cls_pos = pixio_pos[:, :1, :]
+        patch_pos = pixio_pos[:, num_prefix_tokens:, :]
+        orig_size = int(patch_pos.shape[1] ** 0.5)
+        if orig_size * orig_size != patch_pos.shape[1]:
+            raise AssertionError("Pixio patch pos_embed is not square")
+        patch_pos = patch_pos.reshape(1, orig_size, orig_size, -1).permute(0, 3, 1, 2)
+
+        target_h, target_w = student_backbone.patch_embed.patches_resolution
+        resized_patch_pos = F.interpolate(
+            patch_pos,
+            size=(target_h, target_w),
+            mode="bicubic",
+            align_corners=False,
+            antialias=student_backbone.interpolate_antialias,
+        )
+        resized_patch_pos = resized_patch_pos.permute(0, 2, 3, 1).reshape(1, target_h * target_w, -1)
+        student_backbone.pos_embed.copy_(torch.cat((cls_pos, resized_patch_pos), dim=1))
+
+        student_blocks = list(_iter_vit_blocks(student_backbone))
+        pixio_block_indices = sorted({int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")})
+        if pixio_block_indices != list(range(len(student_blocks))):
+            raise AssertionError("Pixio block indices are not contiguous")
+        if len(student_blocks) != len(pixio_block_indices):
+            raise AssertionError("Pixio depth mismatch")
+        if student_blocks and _mlp_kind(student_blocks[0]) != "mlp":
+            raise AssertionError("Pixio checkpoint expects mlp FFN blocks")
+        for idx, dst in enumerate(student_blocks):
+            prefix = f"blocks.{idx}."
+            block_state = {k[len(prefix) :]: v.to(device) for k, v in state_dict.items() if k.startswith(prefix)}
+            if not block_state:
+                raise AssertionError(f"Missing pixio block {idx} in checkpoint")
+            dst.load_state_dict(block_state, strict=True)
+
+        student_backbone.norm.weight.copy_(state_dict["norm.weight"].to(device))
+        student_backbone.norm.bias.copy_(state_dict["norm.bias"].to(device))
+
+def _load_dinov3_pretrained_backbone(cfg, model):
+    ckpt_path = cfg.train.pretrained_ckpt
+    logger.info("Loading dinov3 pretrained backbone from: %s", ckpt_path)
+    state_dict = torch.load(ckpt_path, map_location="cpu")
+    if "teacher" in state_dict:
+        state_dict = state_dict["teacher"]
+    elif "backbone" in state_dict:
+        state_dict = state_dict["backbone"]
+    else:
+        raise ValueError("DINOv3 checkpoint must contain 'teacher' or 'backbone'")
+
+    if any(k.startswith("backbone.") for k in state_dict):
+        state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items() if k.startswith("backbone.")}
+
+    if hasattr(model, "teacher"):
+        student_backbone = model.student.backbone
+    elif hasattr(model, "backbone"):
+        student_backbone = model.backbone
+    else:
+        raise ValueError("Pretrained load expects model with teacher or backbone")
+
+    load_msg = student_backbone.load_state_dict(state_dict, strict=True)
+    logger.info("Loaded dinov3 backbone with msg: %s", load_msg)
+
+
+def _load_pretrained_backbone(cfg, model):
+    source = cfg.train.pretrained_source
+    if source == "pixio":
+        return _load_pixio_pretrained_backbone(cfg, model)
+    if source == "dinov3":
+        return _load_dinov3_pretrained_backbone(cfg, model)
+    if source != "dinov2":
+        raise ValueError("cfg.train.pretrained_source must be 'dinov2', 'pixio', or 'dinov3'")
 
     hub_name = _resolve_torchhub_name(cfg)
     logger.info("Loading pretrained backbone from torch.hub: %s", hub_name)

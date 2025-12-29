@@ -1,5 +1,7 @@
 MODEL:
   WEIGHTS: ''
+model:
+  family: dinov2
 compute_precision:
   grad_scaler: true
   teacher:
