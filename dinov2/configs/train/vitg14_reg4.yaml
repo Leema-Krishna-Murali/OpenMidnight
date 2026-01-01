@@ -21,7 +21,7 @@ lejepa:
   proj_nlayers: 3
   proj_norm: layernorm
 model:
-  family: dinov3 # dinov2 or dinov3
+  family: dinov2 # dinov2 or dinov3
 compute_precision:
   grad_scaler: false
   teacher:
@@ -63,7 +63,7 @@ compute_precision:
         reduce_dtype: fp32
         buffer_dtype: fp32
 train:
-  objective: dinov2 # dinov2 or lejepa
+  objective: lejepa # dinov2 or lejepa
   pretrained_source: dinov2 # dinov2, dinov3, or pixio
   pretrained_ckpt: /data/dinov2_ckpt_for_blog/teacher_checkpoint.pth
   # dinov3: /home/paul/dinov3/checkpoints/dinov3_vit7b16_saved_teacher.pth 
@@ -79,14 +79,14 @@ train:
   OFFICIAL_EPOCH_LENGTH: 1250
   num_workers: 4
   skip_checkpointer: false
-# student: #dinov2
-#   arch: vit_giant2 
-#   patch_size: 14 
-#   drop_path_rate: 0.4 
-#   ffn_layer: swiglufused 
-#   block_chunks: 4
-#   num_register_tokens: 4 
-#   layerscale: 1.0e-05 
+student: #dinov2
+  arch: vit_giant2 
+  patch_size: 14 
+  drop_path_rate: 0.4 
+  ffn_layer: swiglufused 
+  block_chunks: 4
+  num_register_tokens: 4 
+  layerscale: 1.0e-05 
 # student: #pixio
 #   arch: vit_huge 
 #   patch_size: 16
@@ -103,31 +103,31 @@ train:
 #   block_chunks: 4
 #   num_register_tokens: 7
 #   layerscale: 0.0
-student: #dinov3 vit7b16
-  arch: vit_7b
-  patch_size: 16
-  drop_path_rate: 0.4
-  layerscale: 1.0e-05
-  ffn_layer: swiglu64
-  ffn_ratio: 3.0
-  norm_layer: layernormbf16
-  n_storage_tokens: 4
-  qkv_bias: false
-  proj_bias: true
-  ffn_bias: true
-  mask_k_bias: true
-  untie_cls_and_patch_norms: false
-  untie_global_and_local_cls_norm: true
-  pos_embed_rope_base: 100.0
-  pos_embed_rope_min_period: null
-  pos_embed_rope_max_period: null
-  pos_embed_rope_normalize_coords: separate
-  pos_embed_rope_shift_coords: null
-  pos_embed_rope_jitter_coords: null
-  pos_embed_rope_rescale_coords: 2.0
-  pos_embed_rope_dtype: fp32
-  fp8_enabled: false
-  fp8_filter: blocks
+# student: #dinov3 vit7b16
+#   arch: vit_7b
+#   patch_size: 16
+#   drop_path_rate: 0.4
+#   layerscale: 1.0e-05
+#   ffn_layer: swiglu64
+#   ffn_ratio: 3.0
+#   norm_layer: layernormbf16
+#   n_storage_tokens: 4
+#   qkv_bias: false
+#   proj_bias: true
+#   ffn_bias: true
+#   mask_k_bias: true
+#   untie_cls_and_patch_norms: false
+#   untie_global_and_local_cls_norm: true
+#   pos_embed_rope_base: 100.0
+#   pos_embed_rope_min_period: null
+#   pos_embed_rope_max_period: null
+#   pos_embed_rope_normalize_coords: separate
+#   pos_embed_rope_shift_coords: null
+#   pos_embed_rope_jitter_coords: null
+#   pos_embed_rope_rescale_coords: 2.0
+#   pos_embed_rope_dtype: fp32
+#   fp8_enabled: false
+#   fp8_filter: blocks
 teacher:
   momentum_teacher: 0.994
 optim:

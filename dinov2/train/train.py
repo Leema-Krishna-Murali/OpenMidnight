@@ -559,6 +559,36 @@ def _load_pixio_pretrained_backbone(cfg, model):
         student_backbone.norm.weight.copy_(state_dict["norm.weight"].to(device))
         student_backbone.norm.bias.copy_(state_dict["norm.bias"].to(device))
 
+def _load_dinov2_pretrained_backbone(cfg, model):
+    ckpt_path = cfg.train.pretrained_ckpt
+    logger.info("Loading dinov2 pretrained backbone from: %s", ckpt_path)
+    state_dict = torch.load(ckpt_path, map_location="cpu")
+    if "teacher" in state_dict:
+        state_dict = state_dict["teacher"]
+    elif "backbone" in state_dict:
+        state_dict = state_dict["backbone"]
+    elif "model" in state_dict:
+        state_dict = state_dict["model"]
+
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    if any(k.startswith("teacher.") for k in state_dict):
+        state_dict = {k.replace("teacher.", ""): v for k, v in state_dict.items() if k.startswith("teacher.")}
+    elif any(k.startswith("student.") for k in state_dict):
+        state_dict = {k.replace("student.", ""): v for k, v in state_dict.items() if k.startswith("student.")}
+
+    if any(k.startswith("backbone.") for k in state_dict):
+        state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items() if k.startswith("backbone.")}
+
+    if hasattr(model, "teacher"):
+        student_backbone = model.student.backbone
+    elif hasattr(model, "backbone"):
+        student_backbone = model.backbone
+    else:
+        raise ValueError("Pretrained load expects model with teacher or backbone")
+
+    load_msg = student_backbone.load_state_dict(state_dict, strict=True)
+    logger.info("Loaded dinov2 backbone with msg: %s", load_msg)
+
 def _load_dinov3_pretrained_backbone(cfg, model):
     ckpt_path = cfg.train.pretrained_ckpt
     logger.info("Loading dinov3 pretrained backbone from: %s", ckpt_path)
@@ -592,6 +622,10 @@ def _load_pretrained_backbone(cfg, model):
         return _load_dinov3_pretrained_backbone(cfg, model)
     if source != "dinov2":
         raise ValueError("cfg.train.pretrained_source must be 'dinov2', 'pixio', or 'dinov3'")
+
+    ckpt_path = cfg.train.get("pretrained_ckpt")
+    if ckpt_path:
+        return _load_dinov2_pretrained_backbone(cfg, model)
 
     hub_name = _resolve_torchhub_name(cfg)
     logger.info("Loading pretrained backbone from torch.hub: %s", hub_name)
