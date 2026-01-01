@@ -17,6 +17,7 @@ from dinov2.layers import DINOHead
 from dinov2.utils.utils import has_batchnorms
 from dinov2.utils.param_groups import get_params_groups_with_decay, fuse_params_groups
 from dinov2.fsdp import get_fsdp_wrapper, ShardedGradScaler, get_fsdp_modules, reshard_fsdp_model
+import dinov2.distributed as distributed
 
 from dinov2.models.vision_transformer import BlockChunk
 
@@ -414,10 +415,23 @@ class SSLMetaArch(nn.Module):
         # below will synchronize all student subnetworks across gpus:
         for k, v in self.student.items():
             self.teacher[k].load_state_dict(self.student[k].state_dict())
+            on_cuda = next(self.student[k].parameters()).is_cuda
+            device_id = distributed.get_local_rank() if on_cuda else None
+            sync_module_states = on_cuda
             student_model_cfg = self.cfg.compute_precision.student[k]
-            self.student[k] = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student[k])
+            self.student[k] = get_fsdp_wrapper(
+                student_model_cfg,
+                modules_to_wrap={BlockChunk},
+                device_id=device_id,
+                sync_module_states=sync_module_states,
+            )(self.student[k])
             teacher_model_cfg = self.cfg.compute_precision.teacher[k]
-            self.teacher[k] = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher[k])
+            self.teacher[k] = get_fsdp_wrapper(
+                teacher_model_cfg,
+                modules_to_wrap={BlockChunk},
+                device_id=device_id,
+                sync_module_states=sync_module_states,
+            )(self.teacher[k])
 
 
 class ProjectionMLP(nn.Module):
@@ -562,9 +576,18 @@ class LeJEPAMetaArch(nn.Module):
         if has_batchnorms(self.student):
             raise NotImplementedError
         student_cfg = self.cfg.compute_precision.student
-        self.student["backbone"] = get_fsdp_wrapper(student_cfg.backbone, modules_to_wrap={BlockChunk})(
-            self.student["backbone"]
-        )
-        self.student["projector"] = get_fsdp_wrapper(student_cfg.dino_head, modules_to_wrap={BlockChunk})(
-            self.student["projector"]
-        )
+        on_cuda = next(self.student["backbone"].parameters()).is_cuda
+        device_id = distributed.get_local_rank() if on_cuda else None
+        sync_module_states = on_cuda
+        self.student["backbone"] = get_fsdp_wrapper(
+            student_cfg.backbone,
+            modules_to_wrap={BlockChunk},
+            device_id=device_id,
+            sync_module_states=sync_module_states,
+        )(self.student["backbone"])
+        self.student["projector"] = get_fsdp_wrapper(
+            student_cfg.dino_head,
+            modules_to_wrap={BlockChunk},
+            device_id=device_id,
+            sync_module_states=sync_module_states,
+        )(self.student["projector"])

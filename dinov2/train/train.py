@@ -1142,6 +1142,10 @@ def do_test(cfg, model, iteration): # save teacher checkpoint (used for eval onl
             step=step,
         )
 
+    if cfg.model.family == "dinov3":
+        logger.info("Skipping PCam evaluation for dinov3 family")
+        return
+
     pcam_root = str(cfg.evaluation.pcam_root)
 
     def _pcam_h5_path(root, split, key):
@@ -1312,7 +1316,8 @@ def do_test(cfg, model, iteration): # save teacher checkpoint (used for eval onl
 def do_train(cfg, model, resume=False):
     model.train()
     objective = cfg.train.objective
-    inputs_dtype = torch.half
+    dtype_map = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+    inputs_dtype = dtype_map[cfg.compute_precision.student.backbone.mixed_precision.param_dtype]
     fp16_scaler = model.fp16_scaler  # for mixed precision training
     if distributed.is_main_process():
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1728,18 +1733,23 @@ def do_train(cfg, model, resume=False):
 def main(args):
     cfg = setup(args)
     print(cfg)
+    move_to_cuda = cfg.model.family != "dinov3"
     if cfg.train.objective == "dinov2":
-        model = SSLMetaArch(cfg).to(torch.device("cuda"))
+        model = SSLMetaArch(cfg)
     elif cfg.train.objective == "lejepa":
-        model = LeJEPAMetaArch(cfg).to(torch.device("cuda"))
+        model = LeJEPAMetaArch(cfg)
     else:
         raise ValueError("cfg.train.objective must be 'dinov2' or 'lejepa'")
+    if move_to_cuda:
+        model = model.to(torch.device("cuda"))
     #Load model here from pretrained.
     if cfg.train.use_pretrained:
         _load_pretrained_backbone(cfg, model)
     _enable_lora(cfg, model)
 
     model.prepare_for_distributed_training()
+    if not move_to_cuda:
+        model = model.to(torch.device("cuda"))
     logger.info("Model:\n{}".format(model))
 
     if args.eval_only and not cfg.train.skip_checkpointer:

@@ -18,7 +18,10 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp._runtime_utils import _reshard
 
 
-def get_fsdp_wrapper(model_cfg, modules_to_wrap=set()):
+_DEVICE_ID_DEFAULT = object()
+
+
+def get_fsdp_wrapper(model_cfg, modules_to_wrap=set(), *, device_id=_DEVICE_ID_DEFAULT, sync_module_states=True):
     sharding_strategy_dict = {
         "NO_SHARD": ShardingStrategy.NO_SHARD,
         "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
@@ -38,15 +41,15 @@ def get_fsdp_wrapper(model_cfg, modules_to_wrap=set()):
     )
 
     sharding_strategy_config = sharding_strategy_dict[model_cfg.sharding_strategy]
-
-    local_rank = distributed.get_local_rank()
+    if device_id is _DEVICE_ID_DEFAULT:
+        device_id = distributed.get_local_rank()
 
     fsdp_wrapper = partial(
         FSDP,
         sharding_strategy=sharding_strategy_config,
         mixed_precision=mixed_precision_config,
-        device_id=local_rank,
-        sync_module_states=True,
+        device_id=device_id,
+        sync_module_states=sync_module_states,
         use_orig_params=True,
         auto_wrap_policy=ModuleWrapPolicy(modules_to_wrap),
     )
