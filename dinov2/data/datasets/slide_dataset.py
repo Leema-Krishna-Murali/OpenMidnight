@@ -10,8 +10,26 @@ from openslide import OpenSlide
 import numpy as np
 import cv2
 
+def _normalize_tcga_project_id(project_id):
+    if project_id is None:
+        return None
+    value = str(project_id).strip()
+    if not value or value.lower() == "null":
+        return None
+    value = value.upper()
+    if value.startswith("TCGA-"):
+        return value
+    return f"TCGA-{value}"
+
+
+def _line_matches_tcga_project(line, candidates):
+    path = line.split(" ", 1)[0]
+    path_upper = path.upper()
+    return any(candidate in path_upper for candidate in candidates if candidate)
+
+
 class SlideDataset(ExtendedVisionDataset):
-    def __init__(self, root, sample_list_path, *args, **kwargs) -> None:
+    def __init__(self, root, sample_list_path, tcga_project_id=None, *args, **kwargs) -> None:
         super().__init__(root, *args, **kwargs)
         self.sample_list_path = Path(sample_list_path)
         if not self.sample_list_path.is_file():
@@ -19,6 +37,25 @@ class SlideDataset(ExtendedVisionDataset):
 
         with self.sample_list_path.open("r") as f:
             self.image_files = [line.strip() for line in f if line.strip()]
+
+        project_id = _normalize_tcga_project_id(tcga_project_id)
+        if project_id:
+            candidates = {project_id, project_id.replace("TCGA-", "")}
+            before_count = len(self.image_files)
+            filtered = [
+                line for line in self.image_files if _line_matches_tcga_project(line, candidates)
+            ]
+            if not filtered:
+                raise ValueError(
+                    f"No entries matched tcga_project_id={tcga_project_id!r} in {self.sample_list_path}. "
+                    "Ensure sample list paths include the project id (e.g., TCGA-BRCA)."
+                )
+            self.image_files = filtered
+            print(
+                "Filtered sample list to {} entries for tcga_project_id={} (from {})".format(
+                    len(self.image_files), tcga_project_id, before_count
+                )
+            )
 
         print(f"This many resolved paths {len(self.image_files)} from {self.sample_list_path}")
 

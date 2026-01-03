@@ -47,7 +47,7 @@ trainer:
                 repo_or_dir: facebookresearch/dinov2 
                 model: dinov2_vitg14_reg 
                 pretrained: true
-              checkpoint_path: ../checkpoints/teacher_epoch250000.pth
+              checkpoint_path: ${oc.env:CHECKPOINT_PATH, ../checkpoints/teacher_epoch250000.pth}
 
 
           overwrite: true

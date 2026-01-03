@@ -35,10 +35,30 @@ def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, incl
     return module
 
 
+def _materialize_no_grad_output(x):
+    if isinstance(x, list):
+        return [t.detach().clone() for t in x]
+    return x.detach().clone()
+
+
 class BlockChunk(nn.ModuleList):
     def forward(self, x):
-        for b in self:
-            x = b(x)
+        grad_block_start = getattr(self, "grad_block_start", None)
+        if grad_block_start is None:
+            for b in self:
+                x = b(x)
+            return x
+        used_no_grad = False
+        for idx, b in enumerate(self):
+            if idx < grad_block_start:
+                with torch.no_grad():
+                    x = b(x)
+                used_no_grad = True
+            else:
+                if used_no_grad and torch.is_grad_enabled():
+                    x = _materialize_no_grad_output(x)
+                    used_no_grad = False
+                x = b(x)
         return x
 
 
@@ -232,10 +252,28 @@ class DinoVisionTransformer(nn.Module):
 
         return x
 
+    def _forward_blocks(self, x):
+        grad_block_start = getattr(self, "grad_block_start", None)
+        if grad_block_start is None or self.chunked_blocks:
+            for blk in self.blocks:
+                x = blk(x)
+            return x
+        used_no_grad = False
+        for idx, blk in enumerate(self.blocks):
+            if idx < grad_block_start:
+                with torch.no_grad():
+                    x = blk(x)
+                used_no_grad = True
+            else:
+                if used_no_grad and torch.is_grad_enabled():
+                    x = _materialize_no_grad_output(x)
+                    used_no_grad = False
+                x = blk(x)
+        return x
+
     def forward_features_list(self, x_list, masks_list):
         x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
-        for blk in self.blocks:
-            x = blk(x)
+        x = self._forward_blocks(x)
 
         all_x = x
         output = []
@@ -258,8 +296,7 @@ class DinoVisionTransformer(nn.Module):
 
         x = self.prepare_tokens_with_masks(x, masks)
 
-        for blk in self.blocks:
-            x = blk(x)
+        x = self._forward_blocks(x)
 
         x_norm = self.norm(x)
         return {

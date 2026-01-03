@@ -177,11 +177,19 @@ def _normalize_block_indices(indices, num_blocks, name):
     return resolved
 
 
-def _unfreeze_layer_norms(module):
-    for submodule in module.modules():
-        if isinstance(submodule, nn.LayerNorm):
-            for param in submodule.parameters():
-                param.requires_grad = True
+def _unfreeze_layer_norms_in_blocks(blocks, block_indices):
+    for idx in block_indices:
+        for submodule in blocks[idx].modules():
+            if isinstance(submodule, nn.LayerNorm):
+                for param in submodule.parameters():
+                    param.requires_grad = True
+
+
+def _set_grad_block_start(backbone, grad_block_start):
+    backbone.grad_block_start = grad_block_start
+    if getattr(backbone, "chunked_blocks", False):
+        for chunk in backbone.blocks:
+            chunk.grad_block_start = grad_block_start
 
 
 def _apply_lora_to_mlp(mlp, rank, alpha, dropout):
@@ -264,9 +272,12 @@ def _enable_lora(cfg, model):
         for param in blocks[idx].parameters():
             param.requires_grad = True
 
-    _unfreeze_layer_norms(student_backbone)
+    trainable_blocks = sorted(set(unfrozen_blocks) | set(lora_blocks))
+    _unfreeze_layer_norms_in_blocks(blocks, trainable_blocks)
 
     replaced_mlp, replaced_attn = _apply_lora_to_backbone(cfg, student_backbone)
+    grad_block_start = min(trainable_blocks) if trainable_blocks else num_blocks
+    _set_grad_block_start(student_backbone, grad_block_start)
 
     if teacher_backbone is not None:
         teacher_blocks = _get_vit_blocks(teacher_backbone)
@@ -275,6 +286,7 @@ def _enable_lora(cfg, model):
         _apply_lora_to_backbone(cfg, teacher_backbone)
         for param in teacher_backbone.parameters():
             param.requires_grad = False
+        _set_grad_block_start(teacher_backbone, grad_block_start)
 
     return replaced_mlp, replaced_attn
 
@@ -1353,10 +1365,10 @@ def do_train(cfg, model, resume=False):
     dtype_map = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
     inputs_dtype = dtype_map[cfg.compute_precision.student.backbone.mixed_precision.param_dtype]
     fp16_scaler = model.fp16_scaler  # for mixed precision training
-    if distributed.is_main_process():
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info("Trainable parameters: %s", trainable_params)
-        print(f"Trainable parameters: {trainable_params}", flush=True)
+    # if distributed.is_main_process():
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info("Trainable parameters: %s", trainable_params)
+    print(f"Trainable parameters: {trainable_params}", flush=True)
     if cfg.train.skip_checkpointer:
         print(f"\n\nSkipping FSDP checkpointer (cfg.train.skip_checkpointer={cfg.train.skip_checkpointer})\n\n")
 
@@ -1551,6 +1563,11 @@ def do_train(cfg, model, resume=False):
         if not dataset_root:
             raise ValueError("cfg.train.dataset_root must be set when streaming_from_hf is False")
         dataset_str = f"pathology:root={dataset_root}:sample_list_path={sample_list_path}"
+        tcga_project_id = getattr(cfg.train, "tcga_project_id", None)
+        if tcga_project_id is not None:
+            tcga_project_id_str = str(tcga_project_id).strip()
+            if tcga_project_id_str and tcga_project_id_str.lower() != "null":
+                dataset_str = f"{dataset_str}:tcga_project_id={tcga_project_id_str}"
         dataset = make_dataset(
             dataset_str=dataset_str,
             transform=data_transform,
