@@ -14,6 +14,8 @@ class KDELoss(nn.Module):
     
     def vmF(self, x, y, kappa):
 
+        x = x.float()
+        y = y.float()
         x_norm = F.normalize(x, p=2, dim=-1)
         y_norm = F.normalize(y, p=2, dim=-1)
 

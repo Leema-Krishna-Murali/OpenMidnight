@@ -67,7 +67,7 @@ class DINOLoss(nn.Module):
         # TODO: Use cross_entropy_distribution here
         total_loss = 0
         for s in student_output_list:
-            lsm = F.log_softmax(s / self.student_temp, dim=-1)
+            lsm = F.log_softmax(s.float() / self.student_temp, dim=-1)
             for t in teacher_out_softmaxed_centered_list:
                 loss = torch.sum(t * lsm, dim=-1)
                 total_loss -= loss.mean()

@@ -162,7 +162,7 @@ class SlideDataset(ExtendedVisionDataset):
                 scale_max = min(scale_max, (self.mpp_max / mpp_in) ** 2)
             if scale_min > scale_max:
                 reason = "final global crop mpp outside bounds; upsampling required"
-                self._log_mpp_skip(path, level, reason)
+                # self._log_mpp_skip(path, level, reason)
                 image.close()
                 continue
 

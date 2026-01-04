@@ -70,10 +70,10 @@ train:
    # pixio: /home/paul/path-pixio/pretrained_ckpts/pixio_vith16.pth | pixio 5b: /home/paul/path-pixio/pretrained_ckpts/pixio_vit5b16.pth
    # openmidnight: 
   dataset_root: /data/TCGA
-  tcga_project_id: BRCA # BRCA # set to null to disable, only works if streaming_from_hf=False
-  MPP_min: .25
-  MPP_max: 2.0
-  sample_list_path: /data/TCGA/sample_dataset_30.txt # gives paths to svs files for data loading if streaming_from_hf=False
+  tcga_project_id: null # set to null to disable, only works if streaming_from_hf=False
+  MPP_min: null #.25
+  MPP_max: null #2.0
+  sample_list_path: /data/TCGA/sample_dataset_30_BRCA.txt # gives paths to svs files for data loading if streaming_from_hf=False
   streaming_from_hf: false
   streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled #medarc/TCGA-12K-parquet
   batch_size_per_gpu: 48
@@ -144,7 +144,7 @@ crops:
   global_crops_scale:
   - 0.32
   - 1.0
-  local_crops_number: 6
+  local_crops_number: 8
   local_crops_scale:
   - 0.05
   - 0.32
@@ -156,7 +156,7 @@ evaluation:
   breakhis_root: /data/eva-data/breakhis
   pcam_root: /data/eva-data/patch_camelyon
 lora:
-  enabled: false
+  enabled: true
   rank: 16
   alpha: 16
   dropout: 0.0

@@ -42,12 +42,29 @@ def _materialize_no_grad_output(x):
 
 
 class BlockChunk(nn.ModuleList):
+    def __init__(self, modules, *, chunk_start=0, chunk_end=None):
+        super().__init__(modules)
+        self.chunk_start = int(chunk_start)
+        self.chunk_end = int(chunk_end) if chunk_end is not None else self.chunk_start + len(modules)
+
     def forward(self, x):
         grad_block_start = getattr(self, "grad_block_start", None)
         if grad_block_start is None:
             for b in self:
                 x = b(x)
             return x
+
+        if grad_block_start <= self.chunk_start:
+            for b in self:
+                x = b(x)
+            return x
+
+        if grad_block_start >= self.chunk_end:
+            with torch.no_grad():
+                for b in self:
+                    x = b(x)
+            return x
+
         used_no_grad = False
         for idx, b in enumerate(self):
             if idx < grad_block_start:
@@ -177,8 +194,9 @@ class DinoVisionTransformer(nn.Module):
             chunksize = depth // block_chunks
             for i in range(0, depth, chunksize):
                 # this is to keep the block index consistent if we chunk the block list
-                chunked_blocks.append([nn.Identity()] * i + blocks_list[i : i + chunksize])
-            self.blocks = nn.ModuleList([BlockChunk(p) for p in chunked_blocks])
+                chunk = [nn.Identity()] * i + blocks_list[i : i + chunksize]
+                chunked_blocks.append(BlockChunk(chunk, chunk_start=i, chunk_end=i + chunksize))
+            self.blocks = nn.ModuleList(chunked_blocks)
         else:
             self.chunked_blocks = False
             self.blocks = nn.ModuleList(blocks_list)
