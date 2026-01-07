@@ -1285,7 +1285,9 @@ def do_test(cfg, model, iteration): # save teacher checkpoint (used for eval onl
 def do_train(cfg, model, resume=False):
     model.train()
     objective = cfg.train.objective
-    inputs_dtype = torch.half
+    dtype_key = str(cfg.compute_precision.student.backbone.mixed_precision.param_dtype).lower()
+    dtype_map = {"fp16": torch.half, "bf16": torch.bfloat16, "fp32": torch.float32}
+    inputs_dtype = dtype_map.get(dtype_key, torch.half)
     fp16_scaler = model.fp16_scaler  # for mixed precision training
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
