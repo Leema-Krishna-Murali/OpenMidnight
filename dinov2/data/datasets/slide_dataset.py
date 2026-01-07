@@ -24,8 +24,8 @@ class SlideDataset(ExtendedVisionDataset):
 
     def get_all(self, index):
         parts = self.image_files[index].split(" ")
-        if len(parts) != 6:
-            raise ValueError(f"Expected 6 fields per line, got {len(parts)}")
+        if len(parts) not in (4, 6):
+            raise ValueError(f"Expected 4 or 6 fields per line, got {len(parts)}")
         path = parts[0]
         image = OpenSlide(path)
         return image, path
@@ -33,14 +33,15 @@ class SlideDataset(ExtendedVisionDataset):
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         path = self.image_files[index]
         parts = path.split(" ")
-        if len(parts) != 6:
-            raise ValueError(f"Expected 6 fields per line, got {len(parts)}")
-        path, x, y, level, mpp_x, mpp_y = parts
+        if len(parts) not in (4, 6):
+            raise ValueError(f"Expected 4 or 6 fields per line, got {len(parts)}")
+        path, x, y, level = parts[:4]
         x = int(x)
         y = int(y)
         level = int(level)
-        mpp_x = float(mpp_x)
-        mpp_y = float(mpp_y)
+        if len(parts) == 6:
+            mpp_x = float(parts[4])
+            mpp_y = float(parts[5])
 
         image = OpenSlide(path)
 

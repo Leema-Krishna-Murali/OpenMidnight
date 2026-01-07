@@ -21,8 +21,8 @@ lejepa:
   proj_nlayers: 3
   proj_norm: layernorm
 train:
-  objective: lejepa # dinov2 or lejepa
-  sample_list_path: /data/TCGA/sample_dataset_30.txt # gives paths to svs files for data loading if streaming_from_hf=False
+  objective: dinov2 # dinov2 or lejepa
+  sample_list_path: /data/TCGA/sample_dataset_30_level1_level2.txt # gives paths to svs files for data loading if streaming_from_hf=False
   streaming_from_hf: true
   streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled #medarc/TCGA-12K-parquet
   batch_size_per_gpu: 48
@@ -53,14 +53,16 @@ crops:
   - 1.0
   local_crops_number: 6
   local_crops_scale:
-  - 0.1 # 0.05
+  - 0.05
   - 0.32
   global_crops_size: 224
   local_crops_size: 98 #112
 evaluation:
-  eval_period_iterations: 625 
+  eval_period_iterations: 1250 
   bach_root: /data/eva-data/bach
-lora:
+  breakhis_root: /data/eva-data/breakhis
+  pcam_root: /data/eva-data/patch_camelyon
+peft:
   enabled: true
   rank: 64
   alpha: 64
