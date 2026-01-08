@@ -179,6 +179,7 @@ def make_data_loader(
     sampler_advance: int = 0,
     drop_last: bool = True,
     persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None,
     collate_fn: Optional[Callable[[List[T]], Any]] = None,
 ):
     """
@@ -208,17 +209,20 @@ def make_data_loader(
     )
 
     logger.info("using PyTorch data loader")
-    data_loader = torch.utils.data.DataLoader(
+    data_loader_kwargs = dict(
         dataset,
         sampler=sampler,
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=drop_last,
-        persistent_workers=persistent_workers,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
         collate_fn=collate_fn,
         timeout=600,
     )
+    if prefetch_factor is not None and num_workers > 0:
+        data_loader_kwargs["prefetch_factor"] = prefetch_factor
+    data_loader = torch.utils.data.DataLoader(**data_loader_kwargs)
 
     try:
         logger.info(f"# of batches: {len(data_loader):,d}")

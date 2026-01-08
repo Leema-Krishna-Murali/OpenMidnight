@@ -74,7 +74,8 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.lora_A = nn.Linear(base.in_features, rank, bias=False)
         self.lora_B = nn.Linear(rank, base.out_features, bias=False)
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        # nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.normal_(self.lora_A.weight, std=0.02)
         nn.init.zeros_(self.lora_B.weight)
         self.base.weight.requires_grad = False
         if self.base.bias is not None:
@@ -118,9 +119,11 @@ class LoRAQKV(nn.Module):
         self.lora_B_q = nn.Linear(rank, qkv_dim, bias=False)
         self.lora_A_v = nn.Linear(base.in_features, rank, bias=False)
         self.lora_B_v = nn.Linear(rank, qkv_dim, bias=False)
-        nn.init.kaiming_uniform_(self.lora_A_q.weight, a=math.sqrt(5))
+        # nn.init.kaiming_uniform_(self.lora_A_q.weight, a=math.sqrt(5))
+        nn.init.normal_(self.lora_A_q.weight, std=0.02)
         nn.init.zeros_(self.lora_B_q.weight)
-        nn.init.kaiming_uniform_(self.lora_A_v.weight, a=math.sqrt(5))
+        # nn.init.kaiming_uniform_(self.lora_A_v.weight, a=math.sqrt(5))
+        nn.init.normal_(self.lora_A_v.weight, std=0.02)
         nn.init.zeros_(self.lora_B_v.weight)
         self.base.weight.requires_grad = False
         if self.base.bias is not None:
@@ -1398,10 +1401,15 @@ def do_train(cfg, model, resume=False):
     # setup data loader
 
     if cfg.train.streaming_from_hf:
+        shuffle_buffer = int(getattr(cfg.train, "streaming_shuffle_buffer", 50000))
+        fragment_prefetch_limit = int(getattr(cfg.train, "streaming_fragment_prefetch_limit", 4))
+        fragment_range_size = int(getattr(cfg.train, "streaming_fragment_range_size", 32 << 20))
         dataset_builder = partial(
             _build_streaming_dataset,
             dataset_path=str(cfg.train.streaming_dataset_path),
-            shuffle_buffer=50000,                   
+            shuffle_buffer=shuffle_buffer,
+            fragment_prefetch_limit=fragment_prefetch_limit,
+            fragment_range_size=fragment_range_size,
             base_seed=42, 
         )
 
@@ -1474,16 +1482,26 @@ def do_train(cfg, model, resume=False):
             torch.set_num_threads(1)
             os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
+        prefetch_factor = getattr(cfg.train, "dataloader_prefetch_factor", 4)
+        persistent_workers = bool(getattr(cfg.train, "dataloader_persistent_workers", True))
+        if cfg.train.num_workers == 0:
+            prefetch_factor = None
+            persistent_workers = False
+
+        data_loader_kwargs = dict(
+            dataset=dataset,
             batch_size=cfg.train.batch_size_per_gpu,
             num_workers=cfg.train.num_workers,
             drop_last=True,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=persistent_workers,
             collate_fn=collate_fn,
-            prefetch_factor=4,
             worker_init_fn=_worker_init,
+        )
+        if prefetch_factor is not None:
+            data_loader_kwargs["prefetch_factor"] = prefetch_factor
+        data_loader = torch.utils.data.DataLoader(
+            **data_loader_kwargs,
         )
     else:
         from dinov2.data import SamplerType, make_data_loader, make_dataset
@@ -1506,6 +1524,8 @@ def do_train(cfg, model, resume=False):
             sampler_type=sampler_type,
             sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
             drop_last=True,
+            persistent_workers=bool(getattr(cfg.train, "dataloader_persistent_workers", False)),
+            prefetch_factor=getattr(cfg.train, "dataloader_prefetch_factor", None),
             collate_fn=collate_fn,
         )
 

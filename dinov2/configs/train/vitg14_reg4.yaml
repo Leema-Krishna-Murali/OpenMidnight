@@ -25,11 +25,14 @@ train:
   sample_list_path: /data/TCGA/sample_dataset_30_level1_level2.txt # gives paths to svs files for data loading if streaming_from_hf=False
   streaming_from_hf: true
   streaming_dataset_path: /data/TCGA_parquet_sample30_shuffled #medarc/TCGA-12K-parquet
-  batch_size_per_gpu: 4 #48
+  batch_size_per_gpu: 48
   centering: sinkhorn_knopp
   use_pretrained: True
   OFFICIAL_EPOCH_LENGTH: 1250
-  num_workers: 4
+  num_workers: 8
+  dataloader_prefetch_factor: 8
+  dataloader_persistent_workers: true
+  streaming_fragment_prefetch_limit: 8
   skip_checkpointer: true
   compile:
     enabled: false
@@ -56,7 +59,7 @@ optim:
   epochs: 8000 
   early_stop: 200 # we want to early stop at 200 epochs to replicate SOTA ckpt
   weight_decay_end: 0.2
-  base_lr: 2.0e-03 # learning rate for a batch size of 1024 (swapped from 3.5e-4 to 2.0e-4)
+  base_lr: 2.0e-04 # learning rate for a batch size of 1024 (swapped from 3.5e-4 to 2.0e-4)
   warmup_epochs: 10
   layerwise_decay: 1.0
 crops:
@@ -75,7 +78,7 @@ evaluation:
   breakhis_root: /data/eva-data/breakhis
   pcam_root: /data/eva-data/patch_camelyon/stop
 peft:
-  enabled: true
+  enabled: false
   rank: 64
   alpha: 64
   dropout: 0.0
@@ -92,38 +95,38 @@ compute_precision:
   grad_scaler: false
   teacher:
     backbone:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16
         buffer_dtype: bf16
     dino_head:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16
         buffer_dtype: bf16
     ibot_head:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16
         buffer_dtype: bf16
   student:
     backbone:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16
         buffer_dtype: bf16
     dino_head:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16
         buffer_dtype: bf16
     ibot_head:
-      sharding_strategy: NO_SHARD
+      sharding_strategy: SHARD_GRAD_OP
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: bf16

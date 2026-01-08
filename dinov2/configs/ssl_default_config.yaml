@@ -82,6 +82,11 @@ train:
   skip_checkpointer: null  # if null, auto-skip when running on a single GPU
   seed: 0
   num_workers: 10
+  dataloader_prefetch_factor: 4
+  dataloader_persistent_workers: true
+  streaming_shuffle_buffer: 50000
+  streaming_fragment_prefetch_limit: 4
+  streaming_fragment_range_size: 33554432
   OFFICIAL_EPOCH_LENGTH: 1250
   cache_dataset: true
   centering: "centering" # or "sinkhorn_knopp"
