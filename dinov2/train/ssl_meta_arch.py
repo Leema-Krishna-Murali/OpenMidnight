@@ -9,12 +9,13 @@ import logging
 import torch
 from torch import nn
 
-from dinov2.loss import DINOLoss, iBOTPatchLoss, KoLeoLoss, KDELoss
+from dinov2.loss import DINOLoss, iBOTPatchLoss, KoLeoLoss, KDELoss, cplearn_loss_func
 from dinov2.models import build_model_from_cfg
 from dinov2.layers import DINOHead
 from dinov2.utils.utils import has_batchnorms
 from dinov2.utils.param_groups import get_params_groups_with_decay, fuse_params_groups
 from dinov2.fsdp import get_fsdp_wrapper, ShardedGradScaler, get_fsdp_modules, reshard_fsdp_model
+from dinov2.layers.cplearn_projector import CPLearnProjector
 
 from dinov2.models.vision_transformer import BlockChunk
 
@@ -113,6 +114,32 @@ class SSLMetaArch(nn.Module):
                 teacher_model_dict["ibot_head"] = ibot_head()
             else:
                 logger.info("OPTIONS -- IBOT -- head shared with DINO")
+        
+        ## CpLearn         
+        self.cplearn_cfg = getattr(cfg, "cplearn", None)
+        self.cplearn_enabled = bool(self.cplearn_cfg and self.cplearn_cfg.enabled)
+        if self.cplearn_enabled:
+            logger.info("OPTIONS -- CPLearn")
+            logger.info(f"OPTIONS -- CPLearn -- loss_weight: {self.cplearn_cfg.loss_weight}")
+            logger.info(f"OPTIONS -- CPLearn -- proj_hidden_dim: {self.cplearn_cfg.proj_hidden_dim}")
+            logger.info(f"OPTIONS -- CPLearn -- proj_output_dim: {self.cplearn_cfg.proj_output_dim}")
+            student_model_dict["cplearn_projector"] = CPLearnProjector(
+                embed_dim,
+                hidden_dim=self.cplearn_cfg.proj_hidden_dim,
+                proj_dim=self.cplearn_cfg.proj_output_dim,
+                epsilon=self.cplearn_cfg.epsilon,
+            )
+            teacher_model_dict["cplearn_projector"] = CPLearnProjector(
+                embed_dim,
+                hidden_dim=self.cplearn_cfg.proj_hidden_dim,
+                proj_dim=self.cplearn_cfg.proj_output_dim,
+                epsilon=self.cplearn_cfg.epsilon,
+            )
+            self.cplearn_loss_weight = self.cplearn_cfg.loss_weight
+            self.cplearn_beta = self.cplearn_cfg.beta
+        else:
+            self.cplearn_loss_weight = 0.0
+            self.cplearn_beta = 0.0
 
         self.need_to_synchronize_fsdp_streams = True
 
@@ -354,12 +381,34 @@ class SSLMetaArch(nn.Module):
 
             # accumulate loss
             loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
+        
+        # CPlearn loss
+        if self.cplearn_enabled:
+            cplearn_loss = self._compute_cplearn_loss(student_global_cls_tokens, n_global_crops)
+            loss_dict["cplearn_loss"] = cplearn_loss
+            loss_accumulator += self.cplearn_loss_weight * cplearn_loss
+
 
         self.backprop_loss(loss_accumulator)
 
         self.fsdp_synchronize_streams()
 
         return loss_dict
+    
+    def _compute_cplearn_loss(self, student_global_cls_tokens, n_global_crops):
+        with torch.cuda.amp.autocast(enabled=False):
+            cls_tokens = student_global_cls_tokens.float() ## force fp32
+            #n_global_crops, batch_size = cls_tokens.shape
+            if n_global_crops < 2:
+                raise ValueError("CPLearn loss requires at least two global crops.")
+            #cls_tokens = cls_tokens[:2].contiguous().flatten(0, 1)
+            projected = self.student.cplearn_projector(cls_tokens) 
+            #projected = projected.unflatten(0, (2, batch_size))
+            #z1, z2 = projected[0], projected[1]
+            print(f"n_global_crops: {n_global_crops}")
+            z1, z2 = projected.chunk(n_global_crops, dim=0)
+            return cplearn_loss_func(z1, z2, beta=self.cplearn_beta)
+
 
     def fsdp_synchronize_streams(self):
         if self.need_to_synchronize_fsdp_streams:
