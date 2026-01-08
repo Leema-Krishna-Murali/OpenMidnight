@@ -7,4 +7,3 @@ from .dino_clstoken_loss import DINOLoss
 from .ibot_patch_loss import iBOTPatchLoss
 from .koleo_loss import KoLeoLoss
 from .kde_loss import KDELoss
-from .cplearn_loss import cplearn_loss_func
