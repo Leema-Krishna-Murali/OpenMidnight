@@ -40,6 +40,12 @@ compute_precision:
         param_dtype: fp16
         reduce_dtype: fp32
         buffer_dtype: fp32
+fsdp:
+  sync_module_states: true
+  use_orig_params: true
+  forward_prefetch: false
+  backward_prefetch: BACKWARD_PRE
+  limit_all_gathers: true
 dino:
   loss_weight: 1.0
   head_n_prototypes: 65536
@@ -79,6 +85,18 @@ train:
   OFFICIAL_EPOCH_LENGTH: 1250
   cache_dataset: true
   centering: "centering" # or "sinkhorn_knopp"
+  compile:
+    enabled: false
+    backend: inductor
+    mode: default
+    fullgraph: false
+    dynamic: false
+    compile_student: true
+    compile_teacher: true
+    compile_heads: true
+    fail_on_error: true
+    use_cudagraphs: false
+    cudagraph_trees: false
 student:
   arch: vit_large
   patch_size: 16

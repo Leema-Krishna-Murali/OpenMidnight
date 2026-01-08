@@ -4,6 +4,7 @@
 # found in the LICENSE file in the root directory of this source tree.
 
 from functools import partial
+import inspect
 import logging
 from pathlib import Path
 import sys
@@ -29,12 +30,64 @@ except ImportError:
 
 logger = logging.getLogger("dinov2")
 
+def _should_use_grad_scaler(cfg):
+    if not cfg.compute_precision.grad_scaler:
+        return False
+    param_dtype = str(cfg.compute_precision.student.backbone.mixed_precision.param_dtype).lower()
+    if param_dtype != "fp16":
+        logger.info("Disabling grad scaler because param_dtype is %s", param_dtype)
+        return False
+    return True
+
+
+def _compile_kwargs(compile_cfg):
+    kwargs = {}
+    if not hasattr(torch, "compile"):
+        return kwargs
+    sig = inspect.signature(torch.compile)
+    if "backend" in sig.parameters and getattr(compile_cfg, "backend", None):
+        kwargs["backend"] = compile_cfg.backend
+    if "mode" in sig.parameters and getattr(compile_cfg, "mode", None):
+        kwargs["mode"] = compile_cfg.mode
+    if "fullgraph" in sig.parameters:
+        kwargs["fullgraph"] = bool(getattr(compile_cfg, "fullgraph", False))
+    if "dynamic" in sig.parameters:
+        kwargs["dynamic"] = bool(getattr(compile_cfg, "dynamic", False))
+    if "options" in sig.parameters:
+        options = {}
+        use_cudagraphs = getattr(compile_cfg, "use_cudagraphs", None)
+        if use_cudagraphs is not None:
+            use_cudagraphs = bool(use_cudagraphs)
+            options["triton.cudagraphs"] = use_cudagraphs
+            options["triton.cudagraph_trees"] = bool(
+                getattr(compile_cfg, "cudagraph_trees", use_cudagraphs)
+            )
+        if options:
+            kwargs["options"] = options
+    return kwargs
+
+
+def _apply_inductor_settings(compile_cfg):
+    try:
+        import torch._inductor.config as inductor_config
+    except Exception:
+        return
+    use_cudagraphs = getattr(compile_cfg, "use_cudagraphs", None)
+    if use_cudagraphs is None:
+        return
+    use_cudagraphs = bool(use_cudagraphs)
+    inductor_config.triton.cudagraphs = use_cudagraphs
+    if hasattr(inductor_config.triton, "cudagraph_trees"):
+        cudagraph_trees = getattr(compile_cfg, "cudagraph_trees", use_cudagraphs)
+        inductor_config.triton.cudagraph_trees = bool(cudagraph_trees)
+
 
 class SSLMetaArch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.fp16_scaler = ShardedGradScaler() if cfg.compute_precision.grad_scaler else None
+        self.fp16_scaler = ShardedGradScaler() if _should_use_grad_scaler(cfg) else None
+        self._compiled_callables = {}
 
         student_model_dict = dict()
         teacher_model_dict = dict()
@@ -135,6 +188,54 @@ class SSLMetaArch(nn.Module):
         else:
             loss.backward()
 
+    def _call_module(self, name, module, *args, **kwargs):
+        compiled = self._compiled_callables.get(name)
+        if compiled is not None:
+            return compiled(*args, **kwargs)
+        return module(*args, **kwargs)
+
+    def maybe_compile(self):
+        compile_cfg = getattr(self.cfg.train, "compile", None)
+        if not compile_cfg or not compile_cfg.enabled:
+            return
+        if not hasattr(torch, "compile"):
+            logger.warning("torch.compile is not available; skipping compilation.")
+            return
+        _apply_inductor_settings(compile_cfg)
+        compile_kwargs = _compile_kwargs(compile_cfg)
+        fail_on_error = bool(getattr(compile_cfg, "fail_on_error", True))
+        compile_student = bool(getattr(compile_cfg, "compile_student", True))
+        compile_teacher = bool(getattr(compile_cfg, "compile_teacher", True))
+        compile_heads = bool(getattr(compile_cfg, "compile_heads", True))
+
+        def _register(name, module):
+            def _wrapped(*args, **kwargs):
+                return module(*args, **kwargs)
+
+            try:
+                self._compiled_callables[name] = torch.compile(_wrapped, **compile_kwargs)
+                logger.info("torch.compile enabled for %s", name)
+            except Exception as exc:
+                if fail_on_error:
+                    raise
+                logger.warning("torch.compile failed for %s: %s", name, exc)
+
+        if compile_student:
+            _register("student.backbone", self.student["backbone"])
+            if compile_heads:
+                if "dino_head" in self.student:
+                    _register("student.dino_head", self.student["dino_head"])
+                if "ibot_head" in self.student:
+                    _register("student.ibot_head", self.student["ibot_head"])
+
+        if compile_teacher and hasattr(self, "teacher"):
+            _register("teacher.backbone", self.teacher["backbone"])
+            if compile_heads:
+                if "dino_head" in self.teacher:
+                    _register("teacher.dino_head", self.teacher["dino_head"])
+                if "ibot_head" in self.teacher:
+                    _register("teacher.ibot_head", self.teacher["ibot_head"])
+
     def forward_backward(self, images, teacher_temp):
         n_global_crops = 2
         assert n_global_crops == 2
@@ -163,7 +264,9 @@ class SSLMetaArch(nn.Module):
         @torch.no_grad()
         def get_teacher_output():
             x, n_global_crops_teacher = global_crops, n_global_crops
-            teacher_backbone_output_dict = self.teacher.backbone(x, is_training=True)
+            teacher_backbone_output_dict = self._call_module(
+                "teacher.backbone", self.teacher.backbone, x, is_training=True
+            )
             teacher_cls_tokens = teacher_backbone_output_dict["x_norm_clstoken"]
             teacher_cls_tokens = teacher_cls_tokens.chunk(n_global_crops_teacher)
             # watch out: these are chunked and cat'd in reverse so A is matched to B in the global crops dino loss
@@ -181,7 +284,9 @@ class SSLMetaArch(nn.Module):
                     index=mask_indices_list,
                     out=buffer_tensor_teacher[n_cls_tokens : n_cls_tokens + n_masked_patches],
                 )
-                tokens_after_head = self.teacher.dino_head(buffer_tensor_teacher)
+                tokens_after_head = self._call_module(
+                    "teacher.dino_head", self.teacher.dino_head, buffer_tensor_teacher
+                )
                 teacher_cls_tokens_after_head = tokens_after_head[:n_cls_tokens]
                 masked_teacher_patch_tokens_after_head = tokens_after_head[
                     n_cls_tokens : n_cls_tokens + n_masked_patches
@@ -194,12 +299,16 @@ class SSLMetaArch(nn.Module):
                     index=mask_indices_list,
                     out=buffer_tensor_teacher[:n_masked_patches],
                 )
-                teacher_cls_tokens_after_head = self.teacher.dino_head(teacher_cls_tokens)
-                masked_teacher_patch_tokens_after_head = self.teacher.ibot_head(buffer_tensor_teacher)[
-                    :n_masked_patches
-                ]
+                teacher_cls_tokens_after_head = self._call_module(
+                    "teacher.dino_head", self.teacher.dino_head, teacher_cls_tokens
+                )
+                masked_teacher_patch_tokens_after_head = self._call_module(
+                    "teacher.ibot_head", self.teacher.ibot_head, buffer_tensor_teacher
+                )[:n_masked_patches]
             else:
-                teacher_cls_tokens_after_head = self.teacher.dino_head(teacher_cls_tokens)
+                teacher_cls_tokens_after_head = self._call_module(
+                    "teacher.dino_head", self.teacher.dino_head, teacher_cls_tokens
+                )
                 masked_teacher_ibot_softmaxed_centered = None
 
             if self.cfg.train.centering == "centering":
@@ -238,8 +347,12 @@ class SSLMetaArch(nn.Module):
         loss_dict = {}
 
         loss_accumulator = 0  # for backprop
-        student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
-            [global_crops, local_crops], masks=[masks, None], is_training=True
+        student_global_backbone_output_dict, student_local_backbone_output_dict = self._call_module(
+            "student.backbone",
+            self.student.backbone,
+            [global_crops, local_crops],
+            masks=[masks, None],
+            is_training=True,
         )
 
         inputs_for_student_head_list = []
@@ -263,13 +376,15 @@ class SSLMetaArch(nn.Module):
             if not self.ibot_separate_head:
                 inputs_for_student_head_list.append(buffer_tensor_patch_tokens.unsqueeze(0))
             else:
-                student_global_masked_patch_tokens_after_head = self.student.ibot_head(buffer_tensor_patch_tokens)[
-                    :n_masked_patches
-                ]
+                student_global_masked_patch_tokens_after_head = self._call_module(
+                    "student.ibot_head", self.student.ibot_head, buffer_tensor_patch_tokens
+                )[:n_masked_patches]
 
         # 2: run
         _attn_bias, cat_inputs = fmha.BlockDiagonalMask.from_tensor_list(inputs_for_student_head_list)
-        outputs_list = _attn_bias.split(self.student.dino_head(cat_inputs))
+        outputs_list = _attn_bias.split(
+            self._call_module("student.dino_head", self.student.dino_head, cat_inputs)
+        )
 
         # 3a: local crops cls tokens
         student_local_cls_tokens_after_head = outputs_list.pop(0).squeeze(0)
@@ -415,9 +530,13 @@ class SSLMetaArch(nn.Module):
         for k, v in self.student.items():
             self.teacher[k].load_state_dict(self.student[k].state_dict())
             student_model_cfg = self.cfg.compute_precision.student[k]
-            self.student[k] = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student[k])
+            self.student[k] = get_fsdp_wrapper(
+                student_model_cfg, modules_to_wrap={BlockChunk}, fsdp_cfg=self.cfg.fsdp
+            )(self.student[k])
             teacher_model_cfg = self.cfg.compute_precision.teacher[k]
-            self.teacher[k] = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher[k])
+            self.teacher[k] = get_fsdp_wrapper(
+                teacher_model_cfg, modules_to_wrap={BlockChunk}, fsdp_cfg=self.cfg.fsdp
+            )(self.teacher[k])
 
 
 class ProjectionMLP(nn.Module):
@@ -449,7 +568,8 @@ class LeJEPAMetaArch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.fp16_scaler = ShardedGradScaler() if cfg.compute_precision.grad_scaler else None
+        self.fp16_scaler = ShardedGradScaler() if _should_use_grad_scaler(cfg) else None
+        self._compiled_callables = {}
 
         lejepa_root = Path("/home/paul/lejepa")
         sys.path.insert(0, str(lejepa_root))
@@ -491,6 +611,42 @@ class LeJEPAMetaArch(nn.Module):
         else:
             loss.backward()
 
+    def _call_module(self, name, module, *args, **kwargs):
+        compiled = self._compiled_callables.get(name)
+        if compiled is not None:
+            return compiled(*args, **kwargs)
+        return module(*args, **kwargs)
+
+    def maybe_compile(self):
+        compile_cfg = getattr(self.cfg.train, "compile", None)
+        if not compile_cfg or not compile_cfg.enabled:
+            return
+        if not hasattr(torch, "compile"):
+            logger.warning("torch.compile is not available; skipping compilation.")
+            return
+        _apply_inductor_settings(compile_cfg)
+        compile_kwargs = _compile_kwargs(compile_cfg)
+        fail_on_error = bool(getattr(compile_cfg, "fail_on_error", True))
+        compile_student = bool(getattr(compile_cfg, "compile_student", True))
+        compile_heads = bool(getattr(compile_cfg, "compile_heads", True))
+
+        def _register(name, module):
+            def _wrapped(*args, **kwargs):
+                return module(*args, **kwargs)
+
+            try:
+                self._compiled_callables[name] = torch.compile(_wrapped, **compile_kwargs)
+                logger.info("torch.compile enabled for %s", name)
+            except Exception as exc:
+                if fail_on_error:
+                    raise
+                logger.warning("torch.compile failed for %s: %s", name, exc)
+
+        if compile_student:
+            _register("student.backbone", self.backbone)
+            if compile_heads:
+                _register("student.projector", self.projector)
+
     def forward_backward(self, images, teacher_temp=None):
         n_global_crops = 2
         n_local_crops = self.cfg.crops.local_crops_number
@@ -502,16 +658,20 @@ class LeJEPAMetaArch(nn.Module):
         else:
             local_crops = None
 
-        global_out = self.backbone(global_crops, is_training=True)["x_norm_clstoken"]
+        global_out = self._call_module("student.backbone", self.backbone, global_crops, is_training=True)[
+            "x_norm_clstoken"
+        ]
         global_out = global_out.view(n_global_crops, batch_size, -1)
         if n_local_crops > 0:
-            local_out = self.backbone(local_crops, is_training=True)["x_norm_clstoken"]
+            local_out = self._call_module("student.backbone", self.backbone, local_crops, is_training=True)[
+                "x_norm_clstoken"
+            ]
             local_out = local_out.view(n_local_crops, batch_size, -1)
             all_out = torch.cat([global_out, local_out], dim=0)
         else:
             all_out = global_out
 
-        proj = self.projector(all_out.flatten(0, 1))
+        proj = self._call_module("student.projector", self.projector, all_out.flatten(0, 1))
         proj = proj.view(all_out.shape[0], batch_size, -1).float()
         centers = proj[:n_global_crops].mean(dim=0)
         pred_loss = (centers - proj).square().mean()
@@ -562,9 +722,9 @@ class LeJEPAMetaArch(nn.Module):
         if has_batchnorms(self.student):
             raise NotImplementedError
         student_cfg = self.cfg.compute_precision.student
-        self.student["backbone"] = get_fsdp_wrapper(student_cfg.backbone, modules_to_wrap={BlockChunk})(
-            self.student["backbone"]
-        )
-        self.student["projector"] = get_fsdp_wrapper(student_cfg.dino_head, modules_to_wrap={BlockChunk})(
-            self.student["projector"]
-        )
+        self.student["backbone"] = get_fsdp_wrapper(
+            student_cfg.backbone, modules_to_wrap={BlockChunk}, fsdp_cfg=self.cfg.fsdp
+        )(self.student["backbone"])
+        self.student["projector"] = get_fsdp_wrapper(
+            student_cfg.dino_head, modules_to_wrap={BlockChunk}, fsdp_cfg=self.cfg.fsdp
+        )(self.student["projector"])

@@ -1577,6 +1577,11 @@ def do_train(cfg, model, resume=False):
 
         optimizer.zero_grad(set_to_none=True)
 
+        compile_cfg = getattr(cfg.train, "compile", None)
+        if compile_cfg and compile_cfg.enabled:
+            if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                torch.compiler.cudagraph_mark_step_begin()
+
         loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
 
         # clip gradients
@@ -1726,6 +1731,8 @@ def main(args):
     _enable_peft(cfg, model)
 
     model.prepare_for_distributed_training()
+    if hasattr(model, "maybe_compile"):
+        model.maybe_compile()
     logger.info("Model:\n{}".format(model))
 
     if args.eval_only and not cfg.train.skip_checkpointer:

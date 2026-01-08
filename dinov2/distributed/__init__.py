@@ -157,9 +157,6 @@ class _TorchDistributedEnvironment:
         self.local_rank = -1
         self.local_world_size = -1
 
-        if _is_slurm_job_process():
-            return self._set_from_slurm_env()
-
         env_vars = _collect_env_vars()
         if not env_vars:
             # Environment is not set
@@ -171,6 +168,9 @@ class _TorchDistributedEnvironment:
             # Environment is partially set
             collected_env_vars = ", ".join(env_vars.keys())
             raise RuntimeError(f"Partially set environment: {collected_env_vars}")
+
+        if _is_slurm_job_process():
+            return self._set_from_slurm_env()
 
         if torch.cuda.device_count() > 0:
             return self._set_from_local()

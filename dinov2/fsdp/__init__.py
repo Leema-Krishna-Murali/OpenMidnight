@@ -13,12 +13,37 @@ from fvcore.common.checkpoint import Checkpointer
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed.fsdp import MixedPrecision
+from torch.distributed.fsdp import BackwardPrefetch
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp._runtime_utils import _reshard
 
 
-def get_fsdp_wrapper(model_cfg, modules_to_wrap=set()):
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _resolve_backward_prefetch(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        key = value.upper()
+        if key in {"NONE", "NULL"}:
+            return None
+        try:
+            return BackwardPrefetch[key]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported backward_prefetch value: {value}") from exc
+    if isinstance(value, BackwardPrefetch):
+        return value
+    raise ValueError(f"Unsupported backward_prefetch value: {value}")
+
+
+def get_fsdp_wrapper(model_cfg, modules_to_wrap=set(), fsdp_cfg=None):
     sharding_strategy_dict = {
         "NO_SHARD": ShardingStrategy.NO_SHARD,
         "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
@@ -40,14 +65,22 @@ def get_fsdp_wrapper(model_cfg, modules_to_wrap=set()):
     sharding_strategy_config = sharding_strategy_dict[model_cfg.sharding_strategy]
 
     local_rank = distributed.get_local_rank()
+    backward_prefetch = _resolve_backward_prefetch(_cfg_get(fsdp_cfg, "backward_prefetch", "BACKWARD_PRE"))
+    forward_prefetch = bool(_cfg_get(fsdp_cfg, "forward_prefetch", False))
+    limit_all_gathers = bool(_cfg_get(fsdp_cfg, "limit_all_gathers", True))
+    sync_module_states = bool(_cfg_get(fsdp_cfg, "sync_module_states", True))
+    use_orig_params = bool(_cfg_get(fsdp_cfg, "use_orig_params", True))
 
     fsdp_wrapper = partial(
         FSDP,
         sharding_strategy=sharding_strategy_config,
         mixed_precision=mixed_precision_config,
         device_id=local_rank,
-        sync_module_states=True,
-        use_orig_params=True,
+        sync_module_states=sync_module_states,
+        use_orig_params=use_orig_params,
+        forward_prefetch=forward_prefetch,
+        backward_prefetch=backward_prefetch,
+        limit_all_gathers=limit_all_gathers,
         auto_wrap_policy=ModuleWrapPolicy(modules_to_wrap),
     )
     return fsdp_wrapper
